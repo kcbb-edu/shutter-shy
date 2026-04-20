@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: waveform-attack
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: commit

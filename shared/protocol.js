@@ -1,0 +1,94 @@
+import {
+  AUDIO,
+  COUNTDOWN_SECONDS,
+  ELIMINATION_SNAPSHOT_WIDTH,
+  FACE_STALE_HOLD_MS,
+  FACE_UPLOAD_TARGET_MS,
+  FACE_SNAPSHOT_INTERVAL_MS,
+  GAME_PHASES,
+  HIGHLIGHT_EVENT_PRIORITIES,
+  MAX_HIGHLIGHT_SNAPSHOTS_PER_ROUND,
+  MAX_FACE_SNAPSHOT_BYTES,
+  MAX_RECENT_EVENTS,
+  MAX_PLAYERS,
+  RECENT_EVENT_SECONDS,
+  RESPAWN_DELAY_SECONDS,
+  ROLES,
+  RUNNER_LIVES,
+  TICK_MS,
+  TICK_RATE,
+  VIEWPORT_POLICY,
+  WORLD
+} from "./constants.js";
+
+export {
+  AUDIO,
+  COUNTDOWN_SECONDS,
+  ELIMINATION_SNAPSHOT_WIDTH,
+  FACE_STALE_HOLD_MS,
+  FACE_UPLOAD_TARGET_MS,
+  FACE_SNAPSHOT_INTERVAL_MS,
+  GAME_PHASES,
+  HIGHLIGHT_EVENT_PRIORITIES,
+  MAX_HIGHLIGHT_SNAPSHOTS_PER_ROUND,
+  MAX_FACE_SNAPSHOT_BYTES,
+  MAX_RECENT_EVENTS,
+  MAX_PLAYERS,
+  RECENT_EVENT_SECONDS,
+  RESPAWN_DELAY_SECONDS,
+  ROLES,
+  RUNNER_LIVES,
+  TICK_MS,
+  TICK_RATE,
+  VIEWPORT_POLICY,
+  WORLD
+};
+
+export const CLIENT_TYPES = {
+  DISPLAY: "display",
+  CONTROLLER: "controller"
+};
+
+export const MSG_TYPES = {
+  HELLO: "HELLO",
+  UI_STATE: "UI_STATE",
+  GAME_STATE: "GAME_STATE",
+  HIGHLIGHTS: "HIGHLIGHTS",
+  DISPLAY_KEEPALIVE: "DISPLAY_KEEPALIVE",
+  DISPLAY_CAPTURE: "DISPLAY_CAPTURE",
+  FACE_SNAPSHOT: "FACE_SNAPSHOT",
+  ROOM_ERROR: "ROOM_ERROR",
+  ROOM_CLOSED: "ROOM_CLOSED",
+  DISPLAY_NEW_ROOM: "DISPLAY_NEW_ROOM",
+  SET_ROLE: "SET_ROLE",
+  READY: "READY",
+  CONTINUE: "CONTINUE",
+  INPUT: "INPUT",
+  AUDIO: "AUDIO",
+  ATTACKER_SETUP: "ATTACKER_SETUP",
+  LEAVE: "LEAVE"
+};
+
+export function createMessage(type, payload = {}) {
+  return { type, payload };
+}
+
+export function safeParseMessage(raw) {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeRoomCode(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[^a-z0-9]/gi, "")
+    .toUpperCase()
+    .slice(0, 8);
+}

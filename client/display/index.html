@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>聲波大亂鬥 Display</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/display/style.css?v=2026-04-20-a" />
+  </head>
+  <body>
+    <div id="app">
+      <div class="overlay top-left">
+        <div class="panel">
+          <div class="panel-title">玩家</div>
+          <div id="player-list" class="player-list"></div>
+        </div>
+      </div>
+      <div class="overlay top-right">
+        <div class="timer-pill" id="timer-pill">
+          <div class="timer-badge">⏱</div>
+          <div class="timer-body">
+            <div id="phase-label" class="timer-phase">大廳</div>
+            <div class="timer-digits">
+              <span id="timer-whole">30</span><span id="timer-frac" class="timer-frac">.0</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="lobby-overlay" class="overlay lobby-overlay hidden">
+        <div class="lobby-panel">
+          <div class="lobby-qr-wrap">
+            <img id="qr-code" alt="Join QR Code" />
+          </div>
+          <div class="lobby-info">
+            <div class="lobby-header-row">
+              <div class="lobby-game-name">聲波大亂鬥</div>
+              <div id="lobby-player-count" class="lobby-player-count"></div>
+            </div>
+            <div class="lobby-room-label">房間號碼</div>
+            <div id="lobby-room-code" class="lobby-room-code"></div>
+            <div id="lobby-role-status" class="lobby-role-status"></div>
+            <div id="lobby-hint" class="lobby-hint"></div>
+            <div id="lobby-subtitle" class="lobby-subtitle"></div>
+          </div>
+        </div>
+      </div>
+      <div class="overlay center" id="center-card">
+        <div class="panel center-panel">
+          <div id="center-title" class="hero-title"></div>
+          <div id="center-subtitle" class="hero-subtitle"></div>
+          <div id="result-wall" class="result-wall hidden">
+            <div id="result-empty" class="result-empty hidden">這回合沒有精彩鏡頭。</div>
+            <div id="result-photo-wall" class="result-photo-wall"></div>
+          </div>
+        </div>
+      </div>
+      <div class="overlay bottom-right">
+        <button id="new-room-button" class="debug-toggle primary-control">新房間</button>
+        <button id="debug-toggle" class="debug-toggle">除錯面板</button>
+      </div>
+      <div class="overlay loading-overlay" id="loading-overlay">
+        <div class="panel loading-panel">
+          <div id="loading-title" class="hero-title">連線中</div>
+          <div id="loading-copy" class="hero-subtitle">等待房間狀態⋯</div>
+        </div>
+      </div>
+      <div id="countdown-display" class="countdown-display hidden">
+        <span id="countdown-number" class="countdown-number"></span>
+      </div>
+      <div id="debug-overlay" class="debug-overlay hidden">
+        <div class="debug-overlay-inner">
+          <button id="debug-close" class="debug-close-btn">✕ 關閉</button>
+          <div class="debug-section">
+            <div class="panel-title">攻擊設定</div>
+            <div id="setup-status" class="setup-status"></div>
+          </div>
+          <div class="debug-section">
+            <div class="panel-title">回合事件</div>
+            <div id="event-feed" class="event-feed"></div>
+          </div>
+          <div class="debug-section">
+            <div class="panel-title">玩家狀態</div>
+            <div id="debug-player-detail" class="debug-player-detail"></div>
+          </div>
+          <div id="pitch-debug-section" class="debug-section hidden">
+            <div class="panel-title">Pitch 診斷</div>
+            <div id="pitch-debug-detail" class="debug-player-detail"></div>
+          </div>
+        </div>
+      </div>
+      <canvas id="pixi-canvas"></canvas>
+    </div>
+    <script type="module" src="/display/game.js?v=2026-04-20-a"></script>
+  </body>
+</html>
