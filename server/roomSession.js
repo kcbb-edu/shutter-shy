@@ -1,24 +1,10 @@
 import QRCode from "qrcode";
 import { GameState } from "./gameState.js";
-import { CLIENT_TYPES, createMessage, HIGHLIGHT_EVENT_PRIORITIES, MAX_HIGHLIGHT_SNAPSHOTS_PER_ROUND, MSG_TYPES, ROLES } from "../shared/protocol.js";
-import { buildRoundSummary } from "../shared/highlightOverlay.js";
+import { CLIENT_TYPES, MSG_TYPES, ROLES, createMessage } from "../shared/protocol.js";
+import { COPY } from "../shared/copy.js";
 
 const SOCKET_OPEN = 1;
-const CONTROLLER_RECONNECT_GRACE_MS = 15000;
-const DISPLAY_RECONNECT_GRACE_MS = 15000;
-const MAX_BUFFERED_BYTES = 256_000;
-const CONTROLLER_GAME_STATE_INTERVAL_MS = 100;
-const HIGHLIGHT_CAPTURE_SUFFIX_PRIORITIES = {
-  impact: 0,
-  "pre-hit": 1,
-  "reaction-a": 2,
-  "reaction-b": 3
-};
-
-function getCaptureSequenceRank(captureId = "") {
-  const suffix = String(captureId).split("-").slice(-2).join("-");
-  return HIGHLIGHT_CAPTURE_SUFFIX_PRIORITIES[suffix] ?? HIGHLIGHT_CAPTURE_SUFFIX_PRIORITIES[String(captureId).split("-").pop()] ?? 9;
-}
+const MAX_BUFFERED_BYTES = 512_000;
 
 export class RoomSession {
   constructor({ roomCode, publicOrigin, onRoomEmpty, logger = () => {} }) {
@@ -29,23 +15,17 @@ export class RoomSession {
     this.joinUrl = `${publicOrigin}/controller/?room=${roomCode}`;
     this.state = new GameState(roomCode);
     this.display = null;
-    this.displayReconnectTimer = null;
-    this.controllerSockets = new Map();
-    this.controllerReconnectTimers = new Map();
-    this.isClosed = false;
-    this.closedReason = null;
-    this.replacementRoomCode = null;
-    this.lastControllerGameBroadcastAt = 0;
-    this.currentResultOverlay = null;
-    this.pendingHighlightCaptures = new Map();
-    this.lastOverlayRoundId = null;
+    this.controllers = new Map();
     this.lastPhase = this.state.state.phase;
+    this.lastShutterSequence = 0;
+    this.lastBroadcastLobbyRevision = -1;
+    this.lastBroadcastRoundRevision = -1;
     this.ready = this.initialize();
   }
 
   async initialize() {
     const qrCodeDataUrl = await QRCode.toDataURL(this.joinUrl, { margin: 1, width: 320 });
-    this.state.setQrCodeDataUrl(qrCodeDataUrl);
+    this.state.setRoomInfo({ qrCodeDataUrl, joinUrl: this.joinUrl });
   }
 
   isSocketOpen(ws) {
@@ -63,578 +43,363 @@ export class RoomSession {
     return true;
   }
 
-  buildRoomState() {
-    return {
-      roomCode: this.roomCode,
-      joinUrl: this.joinUrl,
-      qrCodeDataUrl: this.state.state.qrCodeDataUrl,
-      displayConnected: Boolean(this.display && this.isSocketOpen(this.display.ws)),
-      isClosed: this.isClosed,
-      closedReason: this.closedReason,
-      replacementRoomCode: this.replacementRoomCode
-    };
-  }
-
-  buildSelfState(ws) {
-    const self = this.controllerSockets.get(ws) || null;
-    if (!self) {
-      return {
-        clientType: CLIENT_TYPES.DISPLAY,
-        playerId: null,
-        sessionId: null
-      };
-    }
-    return {
-      clientType: CLIENT_TYPES.CONTROLLER,
-      playerId: self.playerId,
-      sessionId: self.sessionId
-    };
-  }
-
-  buildUiPayload(ws) {
-    return {
-      room: this.buildRoomState(),
-      self: this.buildSelfState(ws),
-      serverTime: Date.now()
-    };
-  }
-
-  buildGamePayload(ws, { full = false } = {}) {
-    const isDisplay = this.display?.ws === ws;
-    const includeInputs = isDisplay;
-    const game = full
-      ? this.state.getFullState({ includeInputs })
-      : this.state.getDeltaState({ includeInputs });
-    return {
-      game,
-      serverTime: Date.now(),
-      snapshotKind: full ? "full" : "delta"
-    };
-  }
-
-  buildResultOverlayPayload() {
-    if (this.currentResultOverlay) {
-      return this.currentResultOverlay;
-    }
-    return {
-      roundId: this.state.state.roundId,
-      winner: this.state.state.winner,
-      summary: "",
-      items: [],
-      overlayMode: "hidden"
-    };
-  }
-
-  buildResultSummary() {
-    return buildRoundSummary({
-      winner: this.state.state.winner,
-      recentEvents: this.state.state.recentEvents || []
+  sendRoomState(ws) {
+    return this.send(ws, MSG_TYPES.ROOM_STATE, {
+      room: this.state.getRoomState(),
+      self: this.controllers.get(ws) ? this.state.getSelfState(this.controllers.get(ws).playerId) : { playerId: null, role: null }
     });
   }
 
-  createResultOverlay() {
-    const summary = this.buildResultSummary();
-    const items = this.consumePendingCaptures(this.state.state.roundId);
-    this.currentResultOverlay = {
-      roundId: this.state.state.roundId,
-      winner: this.state.state.winner,
-      summary,
-      items,
-      overlayMode: items.length > 0 ? "summary-with-images" : "summary-only"
-    };
-    this.lastOverlayRoundId = this.state.state.roundId;
-    this.logger("room-session", "create-result-overlay", {
-      roomCode: this.roomCode,
-      roundId: this.state.state.roundId,
-      winner: this.state.state.winner,
-      overlayMode: this.currentResultOverlay.overlayMode,
-      itemCount: items.length
-    });
+  sendLobbyState(ws) {
+    return this.send(ws, MSG_TYPES.LOBBY_STATE, this.state.getLobbyState());
   }
 
-  normalizeCapturePayload(payload = {}, roundId) {
-    const imageBase64 = String(payload.imageBase64 || "");
-    if (!/^data:image\/(?:jpeg|png|webp);base64,/.test(imageBase64)) {
-      return null;
-    }
-    const captureId = String(payload.captureId || "").trim() || `capture-${Date.now()}`;
-    return {
-      captureId,
-      caption: payload.caption || "Big screen highlight",
-      eventType: String(payload.eventType || "round-end"),
-      capturedAt: Number(payload.capturedAt || Date.now()),
-      roundId,
-      filename: payload.filename || `waveform-attack-${this.roomCode}-${roundId.slice(0, 8)}-display.jpg`,
-      imageBase64
-    };
+  sendRoundState(ws) {
+    return this.send(ws, MSG_TYPES.ROUND_STATE, this.state.getRoundState());
   }
 
-  sortHighlightItems(items) {
-    items.sort((left, right) => {
-      const leftPriority = HIGHLIGHT_EVENT_PRIORITIES[left.eventType] || 0;
-      const rightPriority = HIGHLIGHT_EVENT_PRIORITIES[right.eventType] || 0;
-      if (leftPriority !== rightPriority) {
-        return rightPriority - leftPriority;
-      }
-      const leftSequence = getCaptureSequenceRank(left.captureId);
-      const rightSequence = getCaptureSequenceRank(right.captureId);
-      if (leftSequence !== rightSequence) {
-        return leftSequence - rightSequence;
-      }
-      return (left.capturedAt || 0) - (right.capturedAt || 0);
-    });
-    return items.slice(0, MAX_HIGHLIGHT_SNAPSHOTS_PER_ROUND);
+  sendGalleryState(ws) {
+    return this.send(ws, MSG_TYPES.GALLERY_STATE, this.state.getGalleryState());
   }
 
-  cachePendingCapture(roundId, nextItem) {
-    const previousItems = this.pendingHighlightCaptures.get(roundId) || [];
-    const existingIndex = previousItems.findIndex((item) => item.captureId === nextItem.captureId);
-    const nextItems = existingIndex >= 0 ? [...previousItems] : [...previousItems, nextItem];
-    if (existingIndex >= 0) {
-      nextItems[existingIndex] = nextItem;
-    }
-    this.pendingHighlightCaptures.set(roundId, nextItems);
+  sendAllState(ws) {
+    this.sendRoomState(ws);
+    this.sendLobbyState(ws);
+    this.sendRoundState(ws);
+    this.sendGalleryState(ws);
   }
 
-  consumePendingCaptures(roundId) {
-    const items = this.pendingHighlightCaptures.get(roundId) || [];
-    this.pendingHighlightCaptures.delete(roundId);
-    return this.sortHighlightItems([...items]);
+  getSockets() {
+    return [
+      ...(this.display?.ws ? [this.display.ws] : []),
+      ...this.controllers.keys()
+    ];
   }
 
-  applyDisplayCapture(payload = {}) {
-    const payloadRoundId = String(payload.roundId || "");
-    if (!payloadRoundId || payloadRoundId !== this.state.state.roundId) {
-      return false;
-    }
-
-    const nextItem = this.normalizeCapturePayload(payload, payloadRoundId);
-    if (!nextItem) {
-      return false;
-    }
-
-    if (!this.currentResultOverlay || this.currentResultOverlay.roundId !== payloadRoundId) {
-      this.cachePendingCapture(payloadRoundId, nextItem);
-      return true;
-    }
-
-    const previousItems = Array.isArray(this.currentResultOverlay.items) ? this.currentResultOverlay.items : [];
-    const existingIndex = previousItems.findIndex((item) => item.captureId === nextItem.captureId);
-    const nextItems = existingIndex >= 0 ? [...previousItems] : [...previousItems, nextItem];
-    if (existingIndex >= 0) {
-      nextItems[existingIndex] = nextItem;
-    }
-    this.currentResultOverlay = {
-      ...this.currentResultOverlay,
-      items: this.sortHighlightItems(nextItems),
-      overlayMode: "summary-with-images"
-    };
-    this.broadcastResultOverlay();
-    return true;
-  }
-
-  handleDisplayKeepalive(payload = {}) {
-    this.logger("room-session", "display-keepalive", {
-      roomCode: this.roomCode,
-      sentAt: Number(payload.sentAt || Date.now())
-    });
-  }
-
-  sendInitialState(ws) {
-    this.send(ws, MSG_TYPES.UI_STATE, this.buildUiPayload(ws));
-    this.send(ws, MSG_TYPES.GAME_STATE, this.buildGamePayload(ws, { full: true }));
-    const overlayPayload = this.buildResultOverlayPayload();
-    this.send(ws, MSG_TYPES.HIGHLIGHTS, overlayPayload);
-  }
-
-  broadcastUiState() {
+  broadcastRoomState() {
     if (this.display?.ws) {
-      this.send(this.display.ws, MSG_TYPES.UI_STATE, this.buildUiPayload(this.display.ws));
+      this.sendRoomState(this.display.ws);
     }
-    this.controllerSockets.forEach((_meta, ws) => {
-      this.send(ws, MSG_TYPES.UI_STATE, this.buildUiPayload(ws));
-    });
-  }
-
-  broadcastDisplayGameState({ full = false } = {}) {
-    if (!this.display?.ws) {
-      return;
+    for (const ws of this.controllers.keys()) {
+      this.sendRoomState(ws);
     }
-    this.send(this.display.ws, MSG_TYPES.GAME_STATE, this.buildGamePayload(this.display.ws, { full }));
   }
 
-  broadcastControllerGameState({ full = false, force = false } = {}) {
-    const now = Date.now();
-    if (!force && !full && now - this.lastControllerGameBroadcastAt < CONTROLLER_GAME_STATE_INTERVAL_MS) {
-      return;
-    }
-    this.lastControllerGameBroadcastAt = now;
-    this.controllerSockets.forEach((_meta, ws) => {
-      this.send(ws, MSG_TYPES.GAME_STATE, this.buildGamePayload(ws, { full }));
-    });
-  }
-
-  broadcastAllState({ full = false, forceController = false } = {}) {
-    this.broadcastUiState();
-    this.broadcastDisplayGameState({ full });
-    this.broadcastControllerGameState({ full, force: forceController || full });
-  }
-
-  broadcastResultOverlay() {
-    const payload = this.buildResultOverlayPayload();
-    this.controllerSockets.forEach((_meta, ws) => {
-      this.send(ws, MSG_TYPES.HIGHLIGHTS, payload);
-    });
+  broadcastLobbyState() {
+    const payload = this.state.getLobbyState();
+    this.lastBroadcastLobbyRevision = payload.lobbyRevision;
     if (this.display?.ws) {
-      this.send(this.display.ws, MSG_TYPES.HIGHLIGHTS, payload);
+      this.send(this.display.ws, MSG_TYPES.LOBBY_STATE, payload);
+    }
+    for (const ws of this.controllers.keys()) {
+      this.send(ws, MSG_TYPES.LOBBY_STATE, payload);
     }
   }
 
-  syncResultOverlayForPhase() {
-    if (this.state.state.phase === "RESULT") {
-      if (this.lastOverlayRoundId !== this.state.state.roundId) {
-        this.createResultOverlay();
-        this.broadcastResultOverlay();
-      }
-      return;
+  broadcastRoundState() {
+    const payload = this.state.getRoundState();
+    this.lastBroadcastRoundRevision = payload.roundRevision;
+    if (this.display?.ws) {
+      this.send(this.display.ws, MSG_TYPES.ROUND_STATE, payload);
     }
-
-    if (this.state.state.phase !== "RESULT" && this.lastPhase === "RESULT" && !this.currentResultOverlay) {
-      this.createResultOverlay();
-      this.broadcastResultOverlay();
+    for (const ws of this.controllers.keys()) {
+      this.send(ws, MSG_TYPES.ROUND_STATE, payload);
     }
   }
 
-  registerDisplay(ws, payload = {}) {
-    this.isClosed = false;
-    this.closedReason = null;
-    this.replacementRoomCode = null;
-
-    if (this.displayReconnectTimer) {
-      clearTimeout(this.displayReconnectTimer);
-      this.displayReconnectTimer = null;
+  broadcastGalleryState() {
+    const payload = this.state.getGalleryState();
+    if (this.display?.ws) {
+      this.send(this.display.ws, MSG_TYPES.GALLERY_STATE, payload);
     }
-
-    if (this.display?.ws && this.display.ws !== ws && this.isSocketOpen(this.display.ws)) {
-      this.display.ws.close(4000, "display-replaced");
+    for (const ws of this.controllers.keys()) {
+      this.send(ws, MSG_TYPES.GALLERY_STATE, payload);
     }
+  }
 
+  registerDisplay(ws) {
     this.display = { ws };
-    this.state.setDisplayMetrics({ aspectRatio: Number(payload.aspectRatio) || null });
-    this.logger("room-session", "display-connected", {
-      roomCode: this.roomCode,
-      aspectRatio: Number(payload.aspectRatio) || null
-    });
-    this.sendInitialState(ws);
-    this.broadcastControllerGameState({ full: true, force: true });
+    this.logger("display", "joined", { roomCode: this.roomCode });
+    this.sendAllState(ws);
   }
 
   registerController(ws, { name, sessionId }) {
-    if (this.isClosed) {
-      this.send(ws, MSG_TYPES.ROOM_CLOSED, {
-        roomCode: this.roomCode,
-        replacementRoomCode: this.replacementRoomCode,
-        reason: this.closedReason || "room-closed"
-      });
-      return null;
-    }
-
-    const normalizedSessionId = String(sessionId || "").trim();
-    const existingPlayer = this.state.state.players.find((player) => player.sessionId === normalizedSessionId);
-
-    if (existingPlayer) {
-      const reconnectTimer = this.controllerReconnectTimers.get(existingPlayer.id);
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        this.controllerReconnectTimers.delete(existingPlayer.id);
-      }
-      this.controllerSockets.set(ws, {
-        playerId: existingPlayer.id,
-        sessionId: normalizedSessionId,
-        name: existingPlayer.name
-      });
-      this.logger("room-session", "controller-reconnected", {
-        roomCode: this.roomCode,
-        playerId: existingPlayer.id,
-        sessionId: normalizedSessionId,
-        name: existingPlayer.name
-      });
-      this.sendInitialState(ws);
-      this.broadcastUiState();
-      return existingPlayer;
-    }
-
-    const player = this.state.addPlayer(name, normalizedSessionId);
+    const wasKnownSession = this.state.state.players.some((entry) => entry.sessionId === sessionId);
+    const player = this.state.addOrReconnectPlayer(name, sessionId);
     if (!player) {
-      this.send(ws, MSG_TYPES.ROOM_ERROR, {
-        message: "Room is full.",
-        roomCode: this.roomCode
-      });
+      this.send(ws, MSG_TYPES.ROOM_ERROR, { message: COPY.errors.roomFull });
       return null;
     }
-
-    this.controllerSockets.set(ws, {
-      playerId: player.id,
-      sessionId: normalizedSessionId,
-      name: player.name
-    });
-    this.logger("room-session", "controller-connected", {
+    this.controllers.set(ws, { playerId: player.id, sessionId });
+    this.logger("controller", wasKnownSession ? "rejoined" : "joined", {
       roomCode: this.roomCode,
       playerId: player.id,
-      sessionId: normalizedSessionId,
-      name: player.name
+      playerName: player.name,
+      sessionId
     });
-    this.sendInitialState(ws);
-    this.broadcastAllState({ full: true, forceController: true });
+    this.sendAllState(ws);
+    this.broadcastRoomState();
+    this.broadcastLobbyState();
+    this.broadcastRoundState();
     return player;
   }
 
   unregisterSocket(ws) {
     if (this.display?.ws === ws) {
       this.display = null;
-      this.logger("room-session", "display-disconnected", { roomCode: this.roomCode });
-      if (!this.isClosed) {
-        this.displayReconnectTimer = setTimeout(() => {
-          this.close({
-            reason: "display-disconnected",
-            replacementRoomCode: null
-          });
-        }, DISPLAY_RECONNECT_GRACE_MS);
-      }
-      this.broadcastUiState();
-      this.emitRoomEmptyIfNeeded();
-      return;
+      this.logger("display", "left", { roomCode: this.roomCode });
     }
-
-    const controller = this.controllerSockets.get(ws);
-    if (!controller) {
-      return;
+    const meta = this.controllers.get(ws);
+    if (meta) {
+      this.state.disconnectPlayer(meta.playerId);
+      const player = this.state.getPlayer(meta.playerId);
+      this.logger("controller", "left", {
+        roomCode: this.roomCode,
+        playerId: meta.playerId,
+        sessionId: meta.sessionId,
+        playerName: player?.name || null
+      });
+      this.controllers.delete(ws);
     }
-
-    this.controllerSockets.delete(ws);
-    this.logger("room-session", "controller-disconnected", {
-      roomCode: this.roomCode,
-      playerId: controller.playerId,
-      sessionId: controller.sessionId
-    });
-    const timer = setTimeout(() => {
-      this.controllerReconnectTimers.delete(controller.playerId);
-      this.state.removePlayer(controller.playerId);
-      this.broadcastAllState({ full: true, forceController: true });
-      this.emitRoomEmptyIfNeeded();
-    }, CONTROLLER_RECONNECT_GRACE_MS);
-
-    this.controllerReconnectTimers.set(controller.playerId, timer);
-    this.broadcastAllState({ full: true, forceController: true });
-    this.emitRoomEmptyIfNeeded();
+    this.broadcastRoomState();
+    this.broadcastLobbyState();
+    this.broadcastRoundState();
+    if (!this.display && this.controllers.size === 0) {
+      this.onRoomEmpty?.(this.roomCode);
+    }
   }
 
   leaveController(ws) {
-    const controller = this.controllerSockets.get(ws);
-    if (!controller) {
+    const meta = this.controllers.get(ws);
+    if (!meta) {
       return;
     }
-
-    this.controllerSockets.delete(ws);
-    this.logger("room-session", "controller-left", {
+    const player = this.state.getPlayer(meta.playerId);
+    this.logger("controller", "leave-room", {
       roomCode: this.roomCode,
-      playerId: controller.playerId,
-      sessionId: controller.sessionId
+      playerId: meta.playerId,
+      sessionId: meta.sessionId,
+      playerName: player?.name || null
     });
-    const reconnectTimer = this.controllerReconnectTimers.get(controller.playerId);
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      this.controllerReconnectTimers.delete(controller.playerId);
-    }
-
-    this.state.removePlayer(controller.playerId);
-    this.broadcastAllState({ full: true, forceController: true });
-    this.emitRoomEmptyIfNeeded();
+    this.state.removePlayer(meta.playerId);
+    this.controllers.delete(ws);
+    this.broadcastRoomState();
+    this.broadcastLobbyState();
+    this.broadcastRoundState();
   }
 
-  emitRoomEmptyIfNeeded() {
-    if (this.display) {
-      return;
-    }
-    if (this.controllerSockets.size > 0) {
-      return;
-    }
-    if (this.controllerReconnectTimers.size > 0) {
-      return;
-    }
-    if (this.displayReconnectTimer) {
-      return;
-    }
-    this.onRoomEmpty?.(this.roomCode);
-  }
-
-  close({ reason = "room-closed", replacementRoomCode = null } = {}) {
-    this.logger("room-session", "close-room", {
+  logPlayerAction(event, meta, details = {}) {
+    const player = this.state.getPlayer(meta.playerId);
+    this.logger("player", event, {
       roomCode: this.roomCode,
-      reason,
-      replacementRoomCode
+      roundId: this.state.state.roundId,
+      playerId: meta.playerId,
+      sessionId: meta.sessionId,
+      playerName: player?.name || null,
+      role: player?.role || null,
+      ...details
     });
-    this.isClosed = true;
-    this.closedReason = reason;
-    this.replacementRoomCode = replacementRoomCode || null;
-
-    if (this.displayReconnectTimer) {
-      clearTimeout(this.displayReconnectTimer);
-      this.displayReconnectTimer = null;
-    }
-
-    this.controllerReconnectTimers.forEach((timer) => clearTimeout(timer));
-    this.controllerReconnectTimers.clear();
-
-    this.controllerSockets.forEach((_meta, ws) => {
-      this.send(ws, MSG_TYPES.ROOM_CLOSED, {
-        roomCode: this.roomCode,
-        replacementRoomCode: this.replacementRoomCode,
-        reason: this.closedReason
-      });
-    });
-
-    this.display = null;
-    this.controllerSockets.clear();
-    this.currentResultOverlay = null;
-    this.pendingHighlightCaptures.clear();
-    this.lastOverlayRoundId = null;
-    this.state.state.players.slice().forEach((player) => {
-      this.state.removePlayer(player.id);
-    });
-    this.emitRoomEmptyIfNeeded();
   }
 
-  handleMessage(ws, message) {
+  handleControllerMessage(ws, message) {
+    const meta = this.controllers.get(ws);
+    if (!meta) {
+      return;
+    }
+    const { playerId } = meta;
+    const payload = message.payload || {};
     switch (message.type) {
-      case MSG_TYPES.SET_ROLE: {
-        const playerId = this.controllerSockets.get(ws)?.playerId || null;
-        const result = this.state.chooseRole(playerId, message.payload?.role);
-        this.logger("room-session", "set-role", {
+      case MSG_TYPES.LOAD_PROGRESS: {
+        const before = this.state.getPlayer(playerId);
+        const motionReadyBefore = Boolean(before?.setup?.motionReady);
+        this.state.setLoadProgress(playerId, payload.progress, payload.setup || {});
+        const after = this.state.getPlayer(playerId);
+        if (!motionReadyBefore && after?.setup?.motionReady) {
+          this.logPlayerAction("setup-complete", meta, { setup: "motion" });
+        }
+        this.broadcastRoomState();
+        this.broadcastLobbyState();
+        this.broadcastRoundState();
+        return;
+      }
+      case MSG_TYPES.ROLE_SET: {
+        const result = this.state.chooseRole(playerId, payload.role);
+        if (!result.ok) {
+          this.logPlayerAction("role-rejected", meta, { requestedRole: payload.role, reason: result.message });
+          this.send(ws, MSG_TYPES.ROOM_ERROR, { message: result.message });
+        } else {
+          this.logPlayerAction(payload.role ? "role-claimed" : "role-released", meta, { role: payload.role || null });
+        }
+        this.broadcastRoomState();
+        this.broadcastLobbyState();
+        this.broadcastRoundState();
+        return;
+      }
+      case MSG_TYPES.READY_SET: {
+        const result = this.state.setReady(playerId, payload.ready);
+        if (!result.ok) {
+          this.logPlayerAction("ready-rejected", meta, { requestedReady: payload.ready, reason: result.message });
+          this.send(ws, MSG_TYPES.ROOM_ERROR, { message: result.message });
+        } else {
+          this.logPlayerAction("ready-set", meta, { ready: payload.ready });
+        }
+        this.broadcastRoomState();
+        this.broadcastLobbyState();
+        this.broadcastRoundState();
+        return;
+      }
+      case MSG_TYPES.THEME_SET: {
+        const themeId = Object.prototype.hasOwnProperty.call(payload, "themeId") ? payload.themeId : null;
+        this.logger("player", "theme-request", {
           roomCode: this.roomCode,
-          playerId,
-          role: message.payload?.role,
-          ok: result?.ok ?? false,
-          reason: result?.reason || null
+          roundId: this.state.state.roundId,
+          playerId: meta.playerId,
+          sessionId: meta.sessionId,
+          requestedTheme: themeId,
+          phase: this.state.state.phase
         });
-        if (!result?.ok) {
-          this.send(ws, MSG_TYPES.ROOM_ERROR, { message: result?.reason || "Unable to choose role." });
+        const result = this.state.setThemePreference(playerId, themeId);
+        if (!result.ok) {
+          this.logPlayerAction("theme-rejected", meta, { requestedTheme: themeId, reason: result.message });
+          this.send(ws, MSG_TYPES.ROOM_ERROR, { message: result.message });
+        } else {
+          this.logPlayerAction("theme-set", meta, {
+            themePreference: result.themePreference,
+            resolvedTheme: result.resolvedTheme
+          });
         }
-        this.broadcastAllState({ full: true, forceController: true });
-        break;
+        this.broadcastRoomState();
+        this.broadcastLobbyState();
+        this.broadcastRoundState();
+        return;
       }
-      case MSG_TYPES.READY: {
-        const playerId = this.controllerSockets.get(ws)?.playerId || null;
-        const result = this.state.setReady(playerId);
-        this.logger("room-session", "set-ready", {
-          roomCode: this.roomCode,
-          playerId,
-          ok: result?.ok ?? false,
-          reason: result?.reason || null
-        });
-        if (!result?.ok) {
-          this.send(ws, MSG_TYPES.ROOM_ERROR, { message: result?.reason || "Unable to ready up." });
-        }
-        this.broadcastAllState({ full: true, forceController: true });
-        break;
-      }
-      case MSG_TYPES.CONTINUE: {
-        const isDisplay = this.display?.ws === ws;
-        const isAttacker = this.state.getPlayer(this.controllerSockets.get(ws)?.playerId)?.role === ROLES.ATTACKER;
-        if (this.state.state.phase === "RESULT" && (isDisplay || isAttacker)) {
-          this.state.continueFromResult();
-          this.broadcastAllState({ full: true, forceController: true });
-        }
-        break;
-      }
-      case MSG_TYPES.DISPLAY_CAPTURE: {
-        const isDisplay = this.display?.ws === ws;
-        if (isDisplay) {
-          this.applyDisplayCapture(message.payload || {});
-        }
-        break;
-      }
-      case MSG_TYPES.DISPLAY_KEEPALIVE: {
-        if (this.display?.ws === ws) {
-          this.handleDisplayKeepalive(message.payload || {});
-        }
-        break;
-      }
-      case MSG_TYPES.FACE_SNAPSHOT: {
-        const playerId = this.controllerSockets.get(ws)?.playerId || null;
-        this.state.updateFaceSnapshot(playerId, message.payload || {});
-        break;
-      }
-      case MSG_TYPES.INPUT: {
-        const playerId = this.controllerSockets.get(ws)?.playerId || null;
-        this.state.setInput(playerId, message.payload?.action, message.payload?.pressed);
-        break;
-      }
-      case MSG_TYPES.AUDIO: {
-        const playerId = this.controllerSockets.get(ws)?.playerId || null;
-        const player = this.state.getPlayer(playerId);
-        if (player?.role === ROLES.ATTACKER) {
-          const trace = this.state.updateAudio(message.payload || {});
-          // Always log compact pitch trace to terminal (~200ms throttle)
-          const nowMs = Date.now();
-          if (trace && nowMs - (this._lastPitchLogAt || 0) >= 200) {
-            this._lastPitchLogAt = nowMs;
-            const amp = message.payload?.amplitudeNorm;
-            const voiced = message.payload?.voiced ? "1" : "0";
-            const bandStr = Number.isInteger(trace.dominantBandIndex) ? String(trace.dominantBandIndex) : "--";
-            const ampStr = Number.isFinite(amp) ? Number(amp).toFixed(2) : "--";
-            const rawHzStr = Number.isFinite(trace.rawFundamentalHz) ? Math.round(trace.rawFundamentalHz) : "--";
-            const fundamentalHzStr = Number.isFinite(trace.fundamentalHz) ? Math.round(trace.fundamentalHz) : "--";
-            const hzStr = Number.isFinite(trace.dominantBandHz) ? Math.round(trace.dominantBandHz) : "--";
-            const rangeStr = trace.profileRangeHz ? `${Math.round(trace.profileRangeHz.lowHz)}-${Math.round(trace.profileRangeHz.highHz)}` : "--";
-            const bandRangeStr = trace.bandRange ? `${Math.round(trace.bandRange.startHz)}-${Math.round(trace.bandRange.endHz)}` : "--";
-            const levelsStr = Array.isArray(trace.levels) ? trace.levels.map((level) => Math.round(level * 9)).join("") : "--";
-            console.log(`[PITCH] voiced=${voiced} rawHz=${rawHzStr} fundamentalHz=${fundamentalHzStr} dominantBand=${bandStr} dominantBandHz=${hzStr} bandHz=${bandRangeStr} amp=${ampStr} profileRange=${rangeStr} levels=${levelsStr} phase=${this.state.state.phase}`);
+      case MSG_TYPES.FACE_FRAME: {
+        const beforeHadFace = Boolean(this.state.getPlayer(playerId)?.faceFrame);
+        const result = this.state.updateFaceFrame(playerId, payload);
+        if (!result.ok) {
+          this.logPlayerAction("face-frame-rejected", meta, { reason: result.message });
+          this.send(ws, MSG_TYPES.ROOM_ERROR, { message: result.message });
+        } else {
+          if (!beforeHadFace) {
+            this.logPlayerAction("setup-complete", meta, { setup: "face" });
           }
         }
-        break;
+        this.broadcastLobbyState();
+        this.broadcastRoundState();
+        return;
       }
-      case MSG_TYPES.ATTACKER_SETUP: {
-        const playerId = this.controllerSockets.get(ws)?.playerId || null;
-        this.state.updateAttackerSetup(playerId, message.payload || {});
-        this.logger("room-session", "attacker-setup", {
-          roomCode: this.roomCode,
-          playerId,
-          hasMicPermission: Boolean(message.payload?.hasMicPermission),
-          environmentPreset: message.payload?.environmentPreset || null,
-          sensitivityPreset: message.payload?.sensitivityPreset || null
+      case MSG_TYPES.GALLERY_REVIEW_SET: {
+        const result = this.state.setGalleryReview(playerId, Boolean(payload.open));
+        if (!result.ok) {
+          this.send(ws, MSG_TYPES.ROOM_ERROR, { message: result.message });
+          return;
+        }
+        this.broadcastRoundState();
+        this.broadcastGalleryState();
+        if (result.reset) {
+          this.logger("round", "lobby-reset", { roomCode: this.roomCode, reason: "all-galleries-closed" });
+          this.broadcastRoomState();
+          this.broadcastLobbyState();
+          this.broadcastRoundState();
+          this.broadcastGalleryState();
+        }
+        return;
+      }
+      case MSG_TYPES.CAMERA_MOTION:
+        this.state.updatePhotographerMotion(playerId, payload);
+        return;
+      case MSG_TYPES.RUNNER_INPUT:
+        this.state.updateRunnerInput(playerId, payload);
+        return;
+      case MSG_TYPES.SHUTTER: {
+        const result = this.state.registerShutter(playerId, payload);
+        if (!result.ok) {
+          this.logPlayerAction("shutter-rejected", meta, { reason: result.message });
+          this.send(ws, MSG_TYPES.ROOM_ERROR, { message: result.message });
+          return;
+        }
+        this.logPlayerAction("shutter", meta, {
+          photoId: result.photo.id,
+          shutterSequence: result.photo.shutterSequence,
+          visibleRunnerIds: result.debug.visibleRunnerIds,
+          newRunnerIds: result.debug.newRunnerIds,
+          blockedRunnerIds: result.debug.blockedRunnerIds,
+          winnerChanged: result.debug.winnerChanged
         });
-        this.broadcastAllState({ full: true, forceController: true });
-        break;
-      }
-      case MSG_TYPES.LEAVE: {
-        this.leaveController(ws);
-        break;
+        this.send(ws, MSG_TYPES.PHOTO_RESULT, {
+          photoId: result.photo.id,
+          shutterSequence: result.photo.shutterSequence,
+          createdAt: result.photo.createdAt,
+          successful: result.photo.capturedRunnerIds.length > 0
+        });
+        this.broadcastRoundState();
+        this.broadcastGalleryState();
+        return;
       }
       default:
-        this.logger("room-session", "unknown-message-type", { type: message.type, roomCode: this.roomCode });
-        break;
+        return;
     }
   }
 
   tick() {
-    if (this.isClosed) {
-      return;
-    }
     const previousPhase = this.state.state.phase;
+    const previousRoundId = this.state.state.roundId;
+    const previousLobbyRevision = this.state.state.lobbyRevision;
+    const previousRoundRevision = this.state.state.roundRevision;
     this.state.tick();
     if (this.state.state.phase !== previousPhase) {
-      this.logger("room-session", "phase-change", {
-        roomCode: this.roomCode,
-        from: previousPhase,
-        to: this.state.state.phase,
-        roundId: this.state.state.roundId,
-        winner: this.state.state.winner
-      });
+      if (this.state.state.phase === "COUNTDOWN") {
+        this.logger("round", "countdown-start", {
+          roomCode: this.roomCode,
+          roundId: previousRoundId
+        });
+      }
+      if (this.state.state.phase === "PLAYING") {
+        this.logger("round", "round-start", {
+          roomCode: this.roomCode,
+          roundId: this.state.state.roundId,
+          resolvedTheme: this.state.state.resolvedTheme
+        });
+      }
+      if (this.state.state.phase === "RESULTS") {
+        this.logger("round", "summary", this.state.buildRoundDebugSummary());
+      }
+      if (this.state.state.phase === "LOBBY" && previousPhase === "RESULTS") {
+        this.logger("round", "lobby-reset", { roomCode: this.roomCode });
+      }
+      this.lastPhase = this.state.state.phase;
+      this.broadcastRoomState();
+      this.broadcastLobbyState();
+      this.broadcastGalleryState();
     }
-    this.syncResultOverlayForPhase();
-    this.broadcastDisplayGameState();
-    this.broadcastControllerGameState();
-    this.lastPhase = this.state.state.phase;
+    if (this.state.state.shutterSequence !== this.lastShutterSequence) {
+      this.lastShutterSequence = this.state.state.shutterSequence;
+    }
+    if (this.state.state.roundRevision !== previousRoundRevision && this.state.state.roundRevision !== this.lastBroadcastRoundRevision) {
+      this.broadcastRoundState();
+    }
+    if (this.state.state.lobbyRevision !== previousLobbyRevision && this.state.state.lobbyRevision !== this.lastBroadcastLobbyRevision) {
+      this.broadcastLobbyState();
+    }
+  }
+
+  close({ reason = "room-reset", replacementRoomCode = null, excludeSockets = [] } = {}) {
+    const excluded = new Set(excludeSockets);
+    this.logger("room", "closed", {
+      roomCode: this.roomCode,
+      reason,
+      replacementRoomCode
+    });
+    if (this.display?.ws && !excluded.has(this.display.ws)) {
+      this.send(this.display.ws, MSG_TYPES.ROOM_CLOSED, { reason, replacementRoomCode });
+    }
+    for (const ws of this.controllers.keys()) {
+      if (!excluded.has(ws)) {
+        this.send(ws, MSG_TYPES.ROOM_CLOSED, { reason, replacementRoomCode });
+      }
+    }
+    this.display = null;
+    this.controllers.clear();
+    this.onRoomEmpty?.(this.roomCode);
   }
 }

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>Shutter Shy 快門追追追</title>
+    <link rel="stylesheet" href="/clients/common/styles.css" />
+  </head>
+  <body>
+    <main id="controller-app" class="controller-app">
+      <canvas id="controller-canvas" class="scene-canvas"></canvas>
+
+      <div class="camera-flash" id="camera-flash"></div>
+
+      <div class="controller-topbar">
+        <div class="panel compact-topbar">
+          <div class="top-brand">
+            <strong>Shutter Shy 快門追追追</strong>
+            <span id="top-room-code" class="top-room-code">----</span>
+          </div>
+          <div class="top-meta">
+            <span id="top-player-name" class="top-chip">訪客</span>
+            <span id="top-role" class="top-chip">尚未選擇</span>
+            <span id="top-state-dot" class="top-dot offline" aria-label="連線狀態"></span>
+          </div>
+          <button id="leave-button" class="ghost hidden top-leave">離開</button>
+        </div>
+      </div>
+
+      <section id="flow-stage" class="controller-stage">
+        <div id="join-screen" class="panel flow-card stack">
+          <div class="flow-header">
+            <div class="pill">步驟 1</div>
+            <h1>加入房間</h1>
+            <p class="status-copy">掃描大螢幕上的 QR Code，或手動輸入房號。</p>
+          </div>
+          <div class="join-form">
+            <input id="name-input" maxlength="20" placeholder="你的名字" />
+            <div class="split-actions">
+              <button id="random-name-button" class="secondary">隨機名字</button>
+              <input id="room-input" maxlength="4" placeholder="房號" type="tel" inputmode="numeric" pattern="[0-9]*" enterkeyhint="done" autocomplete="one-time-code" />
+            </div>
+            <button id="join-button">加入房間</button>
+          </div>
+          <p id="join-status" class="inline-status status-copy">請輸入和大螢幕相同的房號。</p>
+        </div>
+
+        <div id="role-screen" class="panel flow-card stack hidden">
+          <div class="flow-header">
+            <div class="pill">步驟 2</div>
+            <h1>選擇角色</h1>
+            <p id="role-status" class="status-copy">1 位攝影師，最多 3 位跑者。</p>
+          </div>
+          <div class="role-grid">
+            <button id="photographer-role" class="role-card">
+              <strong>攝影師</strong>
+              <span class="status-copy">轉動手機，把所有跑者拍進鏡頭。</span>
+            </button>
+            <button id="runner-role" class="role-card">
+              <strong>跑者</strong>
+              <span class="status-copy">持續移動，別被拍到。</span>
+            </button>
+          </div>
+          <p id="role-room-status" class="inline-status status-copy">等待玩家加入。</p>
+        </div>
+
+        <div id="permissions-screen" class="panel flow-card stack hidden">
+          <div class="panel-nav">
+            <button id="permissions-back-button" class="secondary panel-nav-button">返回</button>
+          </div>
+          <div class="flow-header">
+            <div class="pill">步驟 3</div>
+            <h1 id="permissions-title">啟用權限</h1>
+            <p id="permissions-copy" class="status-copy">完成角色需要的設定。</p>
+          </div>
+
+          <div id="runner-permissions" class="stack hidden">
+            <div class="toggle-row">
+              <div class="stack" style="gap: 0.2rem">
+                <strong>臉部照片</strong>
+                <span class="status-copy">開啟後，會把你的臉套用到角色上。</span>
+              </div>
+              <button id="face-toggle-button" class="toggle-button off" type="button" aria-pressed="false">
+                <span class="toggle-knob"></span>
+              </button>
+            </div>
+            <div id="face-frame-shell" class="video-preview face-frame-shell">
+              <video id="face-video" muted playsinline></video>
+              <canvas id="face-preview-canvas" class="face-preview-canvas hidden" aria-label="臉部預覽"></canvas>
+              <img id="face-preview-image" class="face-preview-image hidden" alt="臉部預覽" />
+              <div class="face-guide">
+                <div class="face-guide-box"></div>
+                <div id="face-guide-label" class="face-guide-label">開啟後會啟動相機。</div>
+              </div>
+            </div>
+            <p id="runner-setup-status" class="inline-status status-copy">先拍到你的臉，才能準備。</p>
+          </div>
+
+          <div id="photographer-permissions" class="stack hidden">
+            <p id="photographer-setup-status" class="inline-status status-copy">請開啟動作感應，才能控制鏡頭。</p>
+            <button id="motion-button">啟用動作感應</button>
+            <div id="theme-picker" class="setup-state">
+              <div class="theme-picker-header">
+                <strong>場景風格</strong>
+                <span id="theme-mode-label" class="pill">每回合隨機</span>
+              </div>
+              <div class="theme-options">
+                <button id="theme-random-button" class="secondary theme-option" type="button">隨機</button>
+                <button id="theme-neon-button" class="secondary theme-option" type="button">霓虹</button>
+                <button id="theme-synthwave-button" class="secondary theme-option" type="button">復古電波</button>
+              </div>
+              <p id="theme-status" class="inline-status status-copy">回合開始時會決定風格。</p>
+            </div>
+          </div>
+          <div class="ready-actions">
+            <button id="permissions-next-button">準備完成</button>
+          </div>
+          <div class="setup-state">
+            <strong>房內玩家</strong>
+            <div id="permission-players" class="players"></div>
+          </div>
+        </div>
+
+        <div id="ready-screen" class="panel flow-card stack hidden"></div>
+
+        <div id="countdown-screen" class="panel flow-card stack hidden">
+          <div class="flow-header">
+            <div class="pill">即將開始</div>
+            <h1>準備開始</h1>
+            <p id="countdown-copy" class="status-copy">倒數結束後就會開始。</p>
+          </div>
+          <div id="countdown-number" class="countdown-number">3</div>
+        </div>
+
+        <div id="post-round-screen" class="panel flow-card stack hidden">
+          <div class="panel-nav">
+            <div class="panel-nav-spacer"></div>
+            <button id="close-downloads-button" class="secondary panel-nav-button" type="button">關閉相簿</button>
+          </div>
+          <div class="flow-header">
+            <div class="pill">本回合結束</div>
+            <h1 id="post-round-title">對戰結果</h1>
+            <p id="post-round-copy" class="status-copy">查看這回合拍到的照片。</p>
+          </div>
+          <div class="setup-state">
+            <strong>跑者結果</strong>
+            <div id="post-round-summary" class="result-badges"></div>
+          </div>
+          <div id="gallery" class="gallery merged-result-gallery"></div>
+        </div>
+      </section>
+
+      <section id="runner-play-ui" class="controller-play-ui hidden">
+        <div class="minimal-top">
+          <div class="panel stack">
+            <div class="pill">跑者</div>
+            <div id="runner-phase-copy" class="status-copy">持續移動，別被拍到。</div>
+          </div>
+          <div class="panel stack">
+            <div class="pill">時間</div>
+            <div id="runner-timer" class="room-code" style="font-size: 1.7rem">30.0</div>
+          </div>
+        </div>
+        <div class="panel runner-pad">
+          <div class="runner-face-strip">
+            <canvas id="runner-face-thumb" class="runner-face-thumb hidden" aria-label="已上傳的臉部預覽"></canvas>
+            <div class="status-copy">這是送進遊戲的裁切臉部照片。</div>
+          </div>
+          <div class="main">
+            <button id="move-left" class="large-button">往左跑</button>
+            <button id="move-right" class="large-button">往右跑</button>
+          </div>
+          <div class="lanes">
+            <button id="lane-in" class="secondary">往內跑</button>
+            <button id="lane-out" class="secondary">往外跑</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="photographer-play-ui" class="controller-play-ui hidden">
+        <div class="minimal-top">
+          <div class="panel stack">
+            <div class="pill">攝影師</div>
+            <div id="photographer-phase-copy" class="status-copy">追蹤跑者並按下快門。</div>
+          </div>
+          <div class="panel stack">
+            <div class="pill">時間</div>
+            <div id="photographer-timer" class="room-code" style="font-size: 1.7rem">30.0</div>
+          </div>
+        </div>
+        <div class="shutter-ui">
+          <div id="shutter-cooldown-shell" class="shutter-cooldown-shell">
+            <div id="shutter-cooldown-ring" class="shutter-cooldown-ring">
+              <button id="shutter-button" class="shutter-button" aria-label="拍照"></button>
+            </div>
+            <div id="shutter-cooldown-label" class="shutter-cooldown-label hidden">可拍照</div>
+          </div>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/clients/controller/main.ts"></script>
+  </body>
+</html>

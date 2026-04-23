@@ -5,18 +5,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocketServer } from "ws";
+import { RoomRegistry } from "./roomRegistry.js";
 import { MSG_TYPES, TICK_MS, safeParseMessage } from "../shared/protocol.js";
 import { logServerEvent } from "./debugLog.js";
-import { RoomRegistry } from "./roomRegistry.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, "..");
+const distDir = path.join(rootDir, "dist/client");
+const runtimeEnvironment = process.env.NODE_ENV || "development";
+const isProduction = runtimeEnvironment === "production";
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
 const buildVersion = process.env.BUILD_VERSION || new Date().toISOString().replace(/[:.]/g, "-");
 const HEARTBEAT_MS = 10000;
-const runtimeEnvironment = process.env.NODE_ENV || "development";
 
 function findMkcertPair() {
   if (process.env.DISABLE_TLS === "1") {
@@ -58,15 +60,50 @@ const publicOrigin = process.env.PUBLIC_ORIGIN || `${protocol}://${publicHost}:$
 
 const app = express();
 app.use((_req, res, next) => {
-  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Expires", "0");
-  res.setHeader("X-Waveform-Build", buildVersion);
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Shutter-Shy-Build", buildVersion);
   next();
 });
-app.use(express.static(path.join(rootDir, "client")));
 app.use("/shared", express.static(path.join(rootDir, "shared")));
-app.use("/pixi", express.static(path.join(rootDir, "node_modules/pixi.js/dist")));
+
+const viteServer = isProduction
+  ? null
+  : await (async () => {
+      const { createServer: createViteServer } = await import("vite");
+      const vite = await createViteServer({
+        server: { middlewareMode: true, hmr: false },
+        appType: "custom"
+      });
+      app.use(vite.middlewares);
+      return vite;
+    })();
+
+async function createHtmlHandler(templatePath, url) {
+  if (isProduction) {
+    const builtPath = path.join(distDir, "clients", templatePath);
+    return (_req, res) => {
+      res.sendFile(builtPath);
+    };
+  }
+  return async (_req, res, next) => {
+    try {
+      const htmlPath = path.join(rootDir, "clients", templatePath);
+      const raw = await fs.promises.readFile(htmlPath, "utf8");
+      const transformed = await viteServer.transformIndexHtml(url, raw);
+      res.status(200).set({ "Content-Type": "text/html" }).end(transformed);
+    } catch (error) {
+      next(error);
+    }
+  };
+}
+
+const displayHandler = await createHtmlHandler("display/index.html", "/display/");
+const controllerHandler = await createHtmlHandler("controller/index.html", "/controller/");
+
+if (isProduction) {
+  app.use(express.static(distDir));
+}
+
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
@@ -76,9 +113,9 @@ app.get("/health", (_req, res) => {
     localTlsEnabled
   });
 });
-app.get("/", (_req, res) => {
-  res.redirect("/display/");
-});
+app.get("/", (_req, res) => res.redirect("/display/"));
+app.get("/display/", displayHandler);
+app.get("/controller/", controllerHandler);
 
 const server = tlsPair
   ? https.createServer(
@@ -98,32 +135,21 @@ const roomRegistry = new RoomRegistry({
 
 wss.on("connection", (ws) => {
   ws.isAlive = true;
-  logServerEvent("ws", "connection-open");
   ws.on("pong", () => {
     ws.isAlive = true;
   });
-
   ws.on("message", async (rawMessage) => {
     const message = safeParseMessage(rawMessage.toString());
     if (!message?.type) {
       return;
     }
-
     if (message.type === MSG_TYPES.HELLO) {
-      logServerEvent("ws", "hello", {
-        clientType: message.payload?.clientType || null,
-        roomCode: message.payload?.roomCode || null,
-        sessionId: message.payload?.sessionId || null
-      });
       await roomRegistry.handleHello(ws, message.payload || {});
       return;
     }
-
     roomRegistry.handleRoomMessage(ws, message);
   });
-
   ws.on("close", () => {
-    logServerEvent("ws", "connection-close");
     roomRegistry.unbindSocket(ws);
   });
 });
@@ -144,13 +170,7 @@ setInterval(() => {
 }, TICK_MS);
 
 server.listen(port, host, () => {
-  console.log(`Waveform Attack server listening on ${publicOrigin}`);
-  console.log(`Build version: ${buildVersion}`);
-  if (tlsPair) {
-    console.log(`TLS certificate: ${tlsPair.certPath}`);
-  } else {
-    console.log("TLS certificate: disabled or not found, using HTTP");
-  }
+  console.log(`Shutter Shy server listening on ${publicOrigin}`);
   console.log(`Display: ${publicOrigin}/display/`);
   console.log(`Controller: ${publicOrigin}/controller/`);
 });

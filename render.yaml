@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: waveform-attack
+    name: shutter-shy
     runtime: node
     plan: free
     region: singapore

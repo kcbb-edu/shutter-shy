@@ -1,6 +1,7 @@
 node_modules/
 .DS_Store
 .claude/
+dist/
 
 # Local TLS certs are only for local HTTPS development and should not affect Render deploys.
 *.pem
@@ -9,3 +10,6 @@ node_modules/
 
 # Local logs and transient files
 *.log
+downloaded_models/
+screenshots/
+TLS Cert/

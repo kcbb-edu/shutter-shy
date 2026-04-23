@@ -1,7 +1,6 @@
-import { CLIENT_TYPES, MSG_TYPES, normalizeRoomCode } from "../shared/protocol.js";
+import { CLIENT_TYPES, MSG_TYPES, ROOM_CODE_LENGTH, normalizeRoomCode } from "../shared/protocol.js";
+import { COPY } from "../shared/copy.js";
 import { RoomSession } from "./roomSession.js";
-
-const ROOM_CODE_LENGTH = 4;
 
 function randomRoomCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
@@ -15,29 +14,6 @@ export class RoomRegistry {
     this.socketMeta = new Map();
   }
 
-  async createRoom(preferredCode = null) {
-    let roomCode = normalizeRoomCode(preferredCode);
-    while (!roomCode || this.rooms.has(roomCode)) {
-      roomCode = randomRoomCode();
-    }
-    const room = new RoomSession({
-      roomCode,
-      publicOrigin: this.publicOrigin,
-      logger: this.logger,
-      onRoomEmpty: (code) => {
-        const current = this.rooms.get(code);
-        if (current && current.controllerSockets.size === 0 && !current.display) {
-          this.logger("room-registry", "delete-room", { roomCode: code });
-          this.rooms.delete(code);
-        }
-      }
-    });
-    this.rooms.set(roomCode, room);
-    this.logger("room-registry", "create-room", { roomCode });
-    await room.ready;
-    return room;
-  }
-
   getRoom(roomCode) {
     const normalized = normalizeRoomCode(roomCode);
     if (!normalized) {
@@ -46,16 +22,48 @@ export class RoomRegistry {
     return this.rooms.get(normalized) || null;
   }
 
-  async getOrCreateRoom(roomCode = null) {
-    const existing = this.getRoom(roomCode);
-    if (existing) {
-      return existing;
+  async createRoom(preferredCode = null) {
+    let roomCode = normalizeRoomCode(preferredCode);
+    while (!roomCode || roomCode.length < ROOM_CODE_LENGTH || this.rooms.has(roomCode)) {
+      roomCode = randomRoomCode();
     }
-    return this.createRoom(roomCode);
+    const room = new RoomSession({
+      roomCode,
+      publicOrigin: this.publicOrigin,
+      logger: this.logger,
+      onRoomEmpty: (code) => {
+        if (this.rooms.has(code)) {
+          this.rooms.delete(code);
+        }
+      }
+    });
+    this.rooms.set(roomCode, room);
+    this.logger("room", "created", { roomCode });
+    await room.ready;
+    return room;
   }
 
   bindSocket(ws, meta) {
     this.socketMeta.set(ws, meta);
+  }
+
+  clearRoomSocketMeta(roomCode) {
+    for (const [ws, meta] of this.socketMeta.entries()) {
+      if (meta.roomCode === roomCode) {
+        this.socketMeta.delete(ws);
+      }
+    }
+  }
+
+  closeRoom(roomCode, { reason = "room-reset", replacementRoomCode = null, excludeSockets = [] } = {}) {
+    const room = this.getRoom(roomCode);
+    if (!room) {
+      return null;
+    }
+    room.close({ reason, replacementRoomCode, excludeSockets });
+    this.clearRoomSocketMeta(room.roomCode);
+    this.rooms.delete(room.roomCode);
+    return room;
   }
 
   unbindSocket(ws) {
@@ -63,9 +71,12 @@ export class RoomRegistry {
     if (!meta) {
       return;
     }
-    this.logger("room-registry", "unbind-socket", meta);
+    if (meta.clientType === CLIENT_TYPES.DISPLAY) {
+      this.closeRoom(meta.roomCode, { reason: "display-disconnected" });
+      return;
+    }
     this.socketMeta.delete(ws);
-    const room = this.getRoom(meta.roomCode);
+    const room = this.rooms.get(meta.roomCode);
     room?.unregisterSocket(ws);
   }
 
@@ -73,79 +84,47 @@ export class RoomRegistry {
     if (ws.readyState !== 1) {
       return;
     }
-    ws.send(
-      JSON.stringify({
-        type: MSG_TYPES.ROOM_ERROR,
-        payload: {
-          message,
-          roomCode
-        }
-      })
-    );
+    ws.send(JSON.stringify({ type: MSG_TYPES.ROOM_ERROR, payload: { message, roomCode } }));
   }
 
   async registerDisplay(ws, payload = {}) {
-    const previous = this.socketMeta.get(ws);
-    if (previous) {
+    const existing = this.socketMeta.get(ws);
+    if (existing) {
       this.unbindSocket(ws);
     }
-
-    const room = await this.getOrCreateRoom(payload.roomCode);
-    this.logger("room-registry", "register-display", { roomCode: room.roomCode });
-    this.bindSocket(ws, {
-      clientType: CLIENT_TYPES.DISPLAY,
-      roomCode: room.roomCode
-    });
-    room.registerDisplay(ws, payload);
+    const room = await this.createRoom(payload.roomCode);
+    this.bindSocket(ws, { clientType: CLIENT_TYPES.DISPLAY, roomCode: room.roomCode });
+    room.registerDisplay(ws);
     return room;
   }
 
   async registerController(ws, payload = {}) {
     const roomCode = normalizeRoomCode(payload.roomCode);
     if (!roomCode || roomCode.length < ROOM_CODE_LENGTH) {
-      this.sendError(ws, "Enter a valid room code.", roomCode || null);
+      this.sendError(ws, COPY.errors.invalidRoomCode, roomCode || null);
       return null;
     }
-
     const sessionId = String(payload.sessionId || "").trim();
     if (!sessionId) {
-      this.sendError(ws, "Missing session id.", roomCode);
+      this.sendError(ws, COPY.errors.missingSessionId, roomCode);
       return null;
     }
-
     const room = this.getRoom(roomCode);
     if (!room) {
-      this.sendError(ws, "Room not found.", roomCode);
+      this.sendError(ws, COPY.errors.roomNotFound, roomCode);
       return null;
     }
-
-    const previous = this.socketMeta.get(ws);
-    if (previous) {
+    const existing = this.socketMeta.get(ws);
+    if (existing) {
       this.unbindSocket(ws);
     }
-
-    this.bindSocket(ws, {
-      clientType: CLIENT_TYPES.CONTROLLER,
-      roomCode,
-      sessionId
-    });
-
     const player = room.registerController(ws, {
       name: payload.name,
       sessionId
     });
     if (!player) {
-      this.socketMeta.delete(ws);
       return null;
     }
-
-    this.logger("room-registry", "register-controller", {
-      roomCode,
-      sessionId,
-      playerId: player.id,
-      role: player.role
-    });
-
     this.bindSocket(ws, {
       clientType: CLIENT_TYPES.CONTROLLER,
       roomCode,
@@ -160,36 +139,29 @@ export class RoomRegistry {
     if (!meta || meta.clientType !== CLIENT_TYPES.DISPLAY) {
       return null;
     }
-
-    const previousRoom = this.getRoom(meta.roomCode);
+    const previousRoom = this.rooms.get(meta.roomCode);
     const nextRoom = await this.createRoom(payload.roomCode);
-    this.logger("room-registry", "replace-display-room", {
+    this.bindSocket(ws, { clientType: CLIENT_TYPES.DISPLAY, roomCode: nextRoom.roomCode });
+    nextRoom.registerDisplay(ws);
+    this.logger("room", "display-replaced-room", {
       previousRoomCode: previousRoom?.roomCode || null,
       nextRoomCode: nextRoom.roomCode
     });
-
-    this.bindSocket(ws, {
-      clientType: CLIENT_TYPES.DISPLAY,
-      roomCode: nextRoom.roomCode
-    });
-    nextRoom.registerDisplay(ws, payload);
-
-    previousRoom?.close({
-      reason: "display-new-room",
-      replacementRoomCode: nextRoom.roomCode
-    });
     if (previousRoom) {
-      this.rooms.delete(previousRoom.roomCode);
+      this.closeRoom(previousRoom.roomCode, {
+        reason: "display-new-room",
+        replacementRoomCode: nextRoom.roomCode,
+        excludeSockets: [ws]
+      });
     }
     return nextRoom;
   }
 
   async handleHello(ws, payload = {}) {
-    const clientType = payload.clientType;
-    if (clientType === CLIENT_TYPES.DISPLAY) {
+    if (payload.clientType === CLIENT_TYPES.DISPLAY) {
       return this.registerDisplay(ws, payload);
     }
-    if (clientType === CLIENT_TYPES.CONTROLLER) {
+    if (payload.clientType === CLIENT_TYPES.CONTROLLER) {
       return this.registerController(ws, payload);
     }
     this.sendError(ws, "Unknown client type.");
@@ -199,33 +171,31 @@ export class RoomRegistry {
   handleRoomMessage(ws, message) {
     const meta = this.socketMeta.get(ws);
     if (!meta) {
-      this.sendError(ws, "Send HELLO before game messages.");
+      this.sendError(ws, "Send HELLO before other messages.");
       return;
     }
-
     if (message.type === MSG_TYPES.DISPLAY_NEW_ROOM) {
       this.replaceDisplayRoom(ws, message.payload || {});
       return;
     }
-
     if (message.type === MSG_TYPES.LEAVE && meta.clientType === CLIENT_TYPES.CONTROLLER) {
       const room = this.getRoom(meta.roomCode);
       room?.leaveController(ws);
       this.socketMeta.delete(ws);
       return;
     }
-
     const room = this.getRoom(meta.roomCode);
     if (!room) {
-      this.sendError(ws, "Room is no longer available.", meta.roomCode);
+      this.sendError(ws, COPY.roomClosed.unavailable, meta.roomCode);
       this.socketMeta.delete(ws);
       return;
     }
-
-    room.handleMessage(ws, message);
+    room.handleControllerMessage(ws, message);
   }
 
   tick() {
-    this.rooms.forEach((room) => room.tick());
+    for (const room of this.rooms.values()) {
+      room.tick();
+    }
   }
 }

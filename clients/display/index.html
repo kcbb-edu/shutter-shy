@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Shutter Shy 快門追追追</title>
+    <link rel="stylesheet" href="/clients/common/styles.css" />
+  </head>
+  <body>
+    <main class="display-shell">
+      <canvas id="display-canvas" class="scene-canvas"></canvas>
+
+      <div class="hud">
+        <div class="hud-top">
+          <div id="lobby-card" class="panel display-card stack">
+            <div class="pill">Shutter Shy 快門追追追</div>
+            <div id="room-code" class="room-code">----</div>
+            <p id="phase-copy" class="status-copy">等待玩家加入。</p>
+            <img id="qr-code" alt="房間 QR Code" style="width: min(26vw, 240px); border-radius: 20px; background: white" />
+            <button id="new-room-button" class="secondary">開新房間</button>
+          </div>
+
+          <div id="round-card" class="panel display-card stack">
+            <div class="pill">回合</div>
+            <div id="timer-pill" class="room-code" style="font-size: 2rem">30.0</div>
+            <div id="score-copy" class="status-copy">攝影師要拍到每位跑者至少 1 次。</div>
+          </div>
+        </div>
+
+        <div class="hud-bottom">
+          <div id="players-card" class="panel display-card stack" style="max-width: 360px">
+            <div class="pill">玩家</div>
+            <div id="players" class="players"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="results-overlay" class="display-overlay hidden">
+        <section id="results-card" class="panel display-results stack">
+          <div id="results-title" class="display-results-title">攝影師獲勝！</div>
+          <div id="runner-summary-grid" class="runner-summary-grid"></div>
+          <div class="display-results-footer">
+            <span id="results-copy" class="status-copy">關閉相簿後繼續…</span>
+            <span id="results-countdown" class="pill">60s</span>
+          </div>
+        </section>
+      </div>
+
+      <div id="countdown-overlay" class="display-overlay hidden">
+        <div class="panel stack">
+          <div class="pill">即將開始</div>
+          <div id="countdown-number" class="countdown-number">3</div>
+        </div>
+      </div>
+    </main>
+    <script type="module" src="/clients/display/main.ts"></script>
+  </body>
+</html>

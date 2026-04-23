@@ -1,51 +1,56 @@
-# Waveform Attack
+# Shutter Shy
 
 ## Local run
 
-Install dependencies and start the server:
+Install dependencies, then start the server:
 
 ```bash
 npm install
 npm start
 ```
 
-By default, local development can use a repo-local mkcert pair if one is present. To force plain HTTP:
+The Node server hosts both the WebSocket backend and the Vite-powered client pages on one port.
+
+Routes:
+
+```text
+/display/
+/controller/
+/health
+```
+
+By default, local development uses a repo-local mkcert pair if one is present. To force plain HTTP:
 
 ```bash
 DISABLE_TLS=1 npm start
 ```
 
-To force local HTTPS explicitly:
+To build the production client bundle:
 
 ```bash
-ENABLE_LOCAL_TLS=1 npm start
+npm run build
 ```
 
-## Render deploy
+To run the test suite:
 
-Render should terminate HTTPS at the platform edge, so the app itself should run over HTTP inside the container.
-
-Set these environment variables in Render:
-
-```text
-DISABLE_TLS=1
-PUBLIC_ORIGIN=https://<your-service>.onrender.com
-NODE_ENV=production
+```bash
+npm test
 ```
 
-Recommended deploy flow:
+## Gameplay prototype
 
-1. Push this repo to GitHub.
-2. Create the Render web service from `render.yaml`.
-3. Let Render assign the initial `https://<service>.onrender.com` URL.
-4. Set `PUBLIC_ORIGIN` to that exact URL.
-5. Redeploy once so newly created rooms generate the correct QR code.
+- One display opens the room and renders the full arena.
+- One photographer phone rotates in place and takes photos.
+- Up to three runner phones move around the ring.
+- Fountain jets randomly block line of sight.
+- Runners upload a face still that is mapped onto their avatar.
+- The round lasts 30 seconds or ends early once all unique runners are captured.
 
 ## Exhibition checklist
 
 1. Open `/display/` 5 to 10 minutes before the session starts.
 2. Confirm `/health` reports the expected `publicOrigin`.
 3. Confirm the display QR code opens `/controller/?room=...` on the same Render hostname.
-4. Confirm a phone can grant microphone access over HTTPS.
-5. Keep the display tab open during the exhibition. It sends low-frequency WebSocket keepalives so Render Free does not spin down from idleness.
-6. Close the display tab after the exhibition. Existing room cleanup logic will close the room when no display/controllers remain.
+4. Confirm runner phones can grant camera access over HTTPS.
+5. Confirm the photographer phone can grant motion permission on Safari.
+6. Keep the display tab open during the exhibition.
