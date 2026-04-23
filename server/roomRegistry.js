@@ -6,6 +6,22 @@ function randomRoomCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
 
+function normalizePublicOrigin(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
 export class RoomRegistry {
   constructor({ publicOrigin, logger = () => {} }) {
     this.publicOrigin = publicOrigin;
@@ -22,14 +38,15 @@ export class RoomRegistry {
     return this.rooms.get(normalized) || null;
   }
 
-  async createRoom(preferredCode = null) {
+  async createRoom(preferredCode = null, publicOriginOverride = null) {
     let roomCode = normalizeRoomCode(preferredCode);
     while (!roomCode || roomCode.length < ROOM_CODE_LENGTH || this.rooms.has(roomCode)) {
       roomCode = randomRoomCode();
     }
+    const roomPublicOrigin = normalizePublicOrigin(publicOriginOverride) || this.publicOrigin;
     const room = new RoomSession({
       roomCode,
-      publicOrigin: this.publicOrigin,
+      publicOrigin: roomPublicOrigin,
       logger: this.logger,
       onRoomEmpty: (code) => {
         if (this.rooms.has(code)) {
@@ -92,7 +109,7 @@ export class RoomRegistry {
     if (existing) {
       this.unbindSocket(ws);
     }
-    const room = await this.createRoom(payload.roomCode);
+    const room = await this.createRoom(payload.roomCode, payload.publicOrigin);
     this.bindSocket(ws, { clientType: CLIENT_TYPES.DISPLAY, roomCode: room.roomCode });
     room.registerDisplay(ws);
     return room;
@@ -140,7 +157,10 @@ export class RoomRegistry {
       return null;
     }
     const previousRoom = this.rooms.get(meta.roomCode);
-    const nextRoom = await this.createRoom(payload.roomCode);
+    const nextRoom = await this.createRoom(
+      payload.roomCode,
+      payload.publicOrigin || previousRoom?.publicOrigin || this.publicOrigin
+    );
     this.bindSocket(ws, { clientType: CLIENT_TYPES.DISPLAY, roomCode: nextRoom.roomCode });
     nextRoom.registerDisplay(ws);
     this.logger("room", "display-replaced-room", {
@@ -176,6 +196,9 @@ export class RoomRegistry {
     }
     if (message.type === MSG_TYPES.DISPLAY_NEW_ROOM) {
       this.replaceDisplayRoom(ws, message.payload || {});
+      return;
+    }
+    if (message.type === MSG_TYPES.DISPLAY_KEEPALIVE && meta.clientType === CLIENT_TYPES.DISPLAY) {
       return;
     }
     if (message.type === MSG_TYPES.LEAVE && meta.clientType === CLIENT_TYPES.CONTROLLER) {

@@ -111,10 +111,11 @@ test("display and controllers can join, ready up, and reach playing state", asyn
 
   const display = createClient(wsOrigin);
   await display.openPromise;
-  display.send(MSG_TYPES.HELLO, { clientType: CLIENT_TYPES.DISPLAY });
+  display.send(MSG_TYPES.HELLO, { clientType: CLIENT_TYPES.DISPLAY, publicOrigin: origin });
   const roomState = await display.waitFor((message) => message.type === MSG_TYPES.ROOM_STATE);
   const roomCode = roomState.payload.room.roomCode;
   assert.match(roomCode, /^\d{4}$/);
+  assert.equal(roomState.payload.room.joinUrl, `${origin}/controller/?room=${roomCode}`);
 
   const photographer = createClient(wsOrigin);
   await photographer.openPromise;

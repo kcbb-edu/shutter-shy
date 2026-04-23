@@ -4,6 +4,8 @@ import { CLIENT_TYPES, DEFAULT_ARENA_THEME_ID, GAME_PHASES, MSG_TYPES } from "..
 import { COPY, formatRoleLabel, formatWinnerTitle } from "../../shared/copy.js";
 
 const socketUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
+const displayOrigin = window.location.origin;
+const DISPLAY_KEEPALIVE_MS = 4 * 60 * 1000;
 
 const elements = {
   canvas: document.getElementById("display-canvas") as HTMLCanvasElement,
@@ -41,6 +43,31 @@ const state = {
 };
 let debugVisible = false;
 let debugRafId = 0;
+let keepAliveTimer = 0;
+
+function stopKeepAlive() {
+  if (keepAliveTimer) {
+    window.clearInterval(keepAliveTimer);
+    keepAliveTimer = 0;
+  }
+}
+
+function sendDisplayKeepAlive() {
+  if (state.socket?.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  state.socket.send(JSON.stringify({
+    type: MSG_TYPES.DISPLAY_KEEPALIVE,
+    payload: {
+      clientType: CLIENT_TYPES.DISPLAY
+    }
+  }));
+}
+
+function startKeepAlive() {
+  stopKeepAlive();
+  keepAliveTimer = window.setInterval(sendDisplayKeepAlive, DISPLAY_KEEPALIVE_MS);
+}
 
 function connect() {
   const socket = new WebSocket(socketUrl);
@@ -49,9 +76,11 @@ function connect() {
     socket.send(JSON.stringify({
       type: MSG_TYPES.HELLO,
       payload: {
-        clientType: CLIENT_TYPES.DISPLAY
+        clientType: CLIENT_TYPES.DISPLAY,
+        publicOrigin: displayOrigin
       }
     }));
+    startKeepAlive();
   });
 
   socket.addEventListener("message", (event) => {
@@ -91,6 +120,7 @@ function connect() {
   });
 
   socket.addEventListener("close", () => {
+    stopKeepAlive();
     window.setTimeout(connect, 800);
   });
 }
@@ -228,7 +258,12 @@ function render() {
 }
 
 elements.newRoomButton.addEventListener("click", () => {
-  state.socket?.send(JSON.stringify({ type: MSG_TYPES.DISPLAY_NEW_ROOM, payload: {} }));
+  state.socket?.send(JSON.stringify({
+    type: MSG_TYPES.DISPLAY_NEW_ROOM,
+    payload: {
+      publicOrigin: displayOrigin
+    }
+  }));
 });
 
 window.addEventListener("pointerdown", () => {

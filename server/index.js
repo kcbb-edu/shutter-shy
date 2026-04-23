@@ -56,8 +56,15 @@ function shouldUseLocalTls() {
 const localTlsEnabled = shouldUseLocalTls();
 const tlsPair = localTlsEnabled ? findMkcertPair() : null;
 const protocol = tlsPair ? "https" : "http";
-const publicHost = process.env.PUBLIC_HOST || process.env.HOST || "127.0.0.1";
-const publicOrigin = process.env.PUBLIC_ORIGIN || `${protocol}://${publicHost}:${port}`;
+const publicHost =
+  process.env.PUBLIC_HOST ||
+  process.env.RENDER_EXTERNAL_HOSTNAME ||
+  process.env.HOST ||
+  "127.0.0.1";
+const publicOrigin =
+  process.env.PUBLIC_ORIGIN ||
+  process.env.RENDER_EXTERNAL_URL ||
+  `${protocol}://${publicHost}:${port}`;
 
 const app = express();
 app.use((_req, res, next) => {
