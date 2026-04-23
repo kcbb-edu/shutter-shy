@@ -76,7 +76,7 @@ type ThemeMountainDatum = {
   tintMix: number;
 };
 
-const GREEN_ROBOT_URL = new URL("../../downloaded_models/GreenRobot.glb", import.meta.url).href;
+const GREEN_ROBOT_URL = "/models/GreenRobot.glb";
 const AVATAR_TARGET_HEIGHT = ARENA.avatarHeight;
 const AVATAR_MODEL_TARGET_HEIGHT = AVATAR_TARGET_HEIGHT * 2.4;
 const RUNNER_PLATFORM_Y = ARENA.ringY + ARENA.ringTubeRadius + 0.03;
