@@ -19,7 +19,7 @@ export const COPY = {
     random: "隨機",
     randomEachRound: "每回合隨機",
     neon: "霓虹",
-    synthwave: "復古電波"
+    synthwave: "彩虹樂園"
   },
   controller: {
     namePlaceholderSuffix: "（或自行輸入）",

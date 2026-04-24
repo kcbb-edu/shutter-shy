@@ -77,6 +77,8 @@ type ThemeMountainDatum = {
 };
 
 const GREEN_ROBOT_URL = "/models/GreenRobot.glb";
+const NEON_PANORAMA_URL = "/environments/neon-city-panorama.png";
+const SYNTHWAVE_PANORAMA_URL = "/environments/rainbow-park-panorama.png";
 const AVATAR_TARGET_HEIGHT = ARENA.avatarHeight;
 const AVATAR_MODEL_TARGET_HEIGHT = AVATAR_TARGET_HEIGHT * 2.4;
 const RUNNER_PLATFORM_Y = ARENA.ringY + ARENA.ringTubeRadius + 0.03;
@@ -179,15 +181,15 @@ const NEON_GLOW_COLOR = new THREE.Color("#2adfff");
 const SYNTHWAVE_GLOW_COLOR = new THREE.Color("#ff9ed8");
 const THEME_GLOW_SIZE = 29;
 const THEME_GLOW_Y = 0.18;
-const SYNTHWAVE_THEME_STOPS = ["#49c6ff", "#ffe27a", "#ff8a7a"].map((color) => new THREE.Color(color));
+const NEON_THEME_STOPS = ["#71ddff", "#ff78cb", "#ffc46e", "#8d95ff"].map((color) => new THREE.Color(color));
+const SYNTHWAVE_THEME_STOPS = ["#8fd8ff", "#ffe18e", "#ffb4be", "#c8b6ff"].map((color) => new THREE.Color(color));
+const SYNTHWAVE_CUBE_STOPS = ["#fff0b8", "#ffd2b8", "#ffc6df", "#cde4ff", "#d8cbff"].map((color) => new THREE.Color(color));
 
 const gltfLoader = new GLTFLoader();
 let avatarAssetPromise: Promise<AvatarAsset> | null = null;
 let faceMaskCircleTexture: THREE.Texture | null = null;
 let arenaGlowTexture: THREE.Texture | null = null;
-let neonSkyTexture: THREE.Texture | null = null;
 let synthwaveSunTexture: THREE.Texture | null = null;
-let synthwaveSkyTexture: THREE.Texture | null = null;
 const tempAnchorWorldPosition = new THREE.Vector3();
 const tempAnchorLocalPosition = new THREE.Vector3();
 const tempThemeTransform = new THREE.Object3D();
@@ -207,22 +209,86 @@ function getRainbowThemeColor(angle: number, elapsedSeconds: number, lightness =
   return new THREE.Color().setHSL(hue < 0 ? hue + 1 : hue, RAINBOW_SATURATION, lightness);
 }
 
+function blendThemeStops(stops: THREE.Color[], angle: number, elapsedSeconds: number, speed: number, lightness: number) {
+  const normalizedAngle = (angle / (Math.PI * 2)) + elapsedSeconds * speed;
+  const wrapped = ((normalizedAngle % 1) + 1) % 1;
+  const scaled = wrapped * stops.length;
+  const fromIndex = Math.floor(scaled) % stops.length;
+  const toIndex = (fromIndex + 1) % stops.length;
+  const mix = scaled - Math.floor(scaled);
+  return stops[fromIndex].clone().lerp(stops[toIndex], mix).offsetHSL(0, 0, lightness - RAINBOW_LIGHTNESS);
+}
+
 function normalizeThemeId(themeId: unknown): ArenaThemeId {
   return themeId === "synthwave" ? "synthwave" : "neon";
 }
 
 function getThemePaletteColor(themeId: ArenaThemeId, angle: number, elapsedSeconds: number, lightness = RAINBOW_LIGHTNESS) {
   if (themeId === "neon") {
-    return getRainbowThemeColor(angle, elapsedSeconds, lightness);
+    return blendThemeStops(NEON_THEME_STOPS, angle, elapsedSeconds, RAINBOW_FLOW_SPEED * 0.76, lightness);
   }
+  return blendThemeStops(SYNTHWAVE_THEME_STOPS, angle, elapsedSeconds, 0.026, lightness);
+}
 
-  const normalizedAngle = (angle / (Math.PI * 2)) + elapsedSeconds * 0.026;
-  const wrapped = ((normalizedAngle % 1) + 1) % 1;
-  const scaled = wrapped * SYNTHWAVE_THEME_STOPS.length;
-  const fromIndex = Math.floor(scaled) % SYNTHWAVE_THEME_STOPS.length;
-  const toIndex = (fromIndex + 1) % SYNTHWAVE_THEME_STOPS.length;
+function getSynthwaveCubeColor(tintMix: number, elapsedSeconds: number, phase: number) {
+  const wrapped = ((tintMix + elapsedSeconds * 0.028 + Math.sin(phase) * 0.015) % 1 + 1) % 1;
+  const scaled = wrapped * SYNTHWAVE_CUBE_STOPS.length;
+  const fromIndex = Math.floor(scaled) % SYNTHWAVE_CUBE_STOPS.length;
+  const toIndex = (fromIndex + 1) % SYNTHWAVE_CUBE_STOPS.length;
   const mix = scaled - Math.floor(scaled);
-  return SYNTHWAVE_THEME_STOPS[fromIndex].clone().lerp(SYNTHWAVE_THEME_STOPS[toIndex], mix).offsetHSL(0, 0, lightness - RAINBOW_LIGHTNESS);
+  return SYNTHWAVE_CUBE_STOPS[fromIndex].clone()
+    .lerp(SYNTHWAVE_CUBE_STOPS[toIndex], mix)
+    .offsetHSL(0, 0, Math.sin(elapsedSeconds * 0.22 + phase) * 0.03);
+}
+
+function applyAvatarThemeMaterials(
+  materials: THREE.Material[],
+  themeId: ArenaThemeId,
+  baseColor: THREE.ColorRepresentation,
+  faceMaskOuterMaterial?: THREE.MeshBasicMaterial | null
+) {
+  const avatarBaseColor = new THREE.Color(baseColor);
+  const themeAccent = themeId === "synthwave" ? new THREE.Color("#ffd4bf") : new THREE.Color("#88dfff");
+  const themeShadow = themeId === "synthwave" ? new THREE.Color("#ff95bd") : new THREE.Color("#ff7bcf");
+  for (const material of materials) {
+    if (!(material instanceof THREE.MeshStandardMaterial)) {
+      continue;
+    }
+    const stored = material.userData.baseThemeColor;
+    const base = stored instanceof THREE.Color
+      ? stored
+      : (() => {
+        const color = material.color.clone();
+        material.userData.baseThemeColor = color;
+        return color;
+      })();
+    material.color.copy(base);
+    if (themeId === "synthwave") {
+      material.color.lerp(themeAccent, 0.14).offsetHSL(0, -0.1, 0.08);
+      material.emissive.copy(avatarBaseColor).lerp(themeShadow, 0.28).multiplyScalar(0.12);
+      material.emissiveIntensity = 0.32;
+      material.roughness = 0.7;
+      material.metalness = 0.02;
+      material.envMapIntensity = 0.14;
+    } else {
+      material.color.lerp(new THREE.Color("#9dbbff"), 0.08).offsetHSL(0, 0.04, -0.02);
+      material.emissive.copy(avatarBaseColor).lerp(themeAccent, 0.34).multiplyScalar(0.16);
+      material.emissiveIntensity = 0.42;
+      material.roughness = 0.38;
+      material.metalness = 0.16;
+      material.envMapIntensity = 0.44;
+    }
+    material.needsUpdate = true;
+  }
+  if (faceMaskOuterMaterial) {
+    faceMaskOuterMaterial.color.copy(avatarBaseColor);
+    if (themeId === "synthwave") {
+      faceMaskOuterMaterial.color.lerp(new THREE.Color("#ffd3c7"), 0.18);
+    } else {
+      faceMaskOuterMaterial.color.lerp(new THREE.Color("#87dfff"), 0.14);
+    }
+    faceMaskOuterMaterial.needsUpdate = true;
+  }
 }
 
 function createTextTexture(label: string, color: string) {
@@ -298,56 +364,6 @@ function getArenaGlowTexture() {
   return arenaGlowTexture;
 }
 
-function getNeonSkyTexture() {
-  if (!neonSkyTexture) {
-    const canvas = document.createElement("canvas");
-    canvas.width = 1024;
-    canvas.height = 1024;
-    const context = canvas.getContext("2d")!;
-    context.clearRect(0, 0, canvas.width, canvas.height);
-
-    const vertical = context.createLinearGradient(0, 0, 0, canvas.height);
-    vertical.addColorStop(0, "rgba(8,16,38,1)");
-    vertical.addColorStop(0.45, "rgba(7,14,31,0.96)");
-    vertical.addColorStop(1, "rgba(3,6,18,0.92)");
-    context.fillStyle = vertical;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-
-    const cyanBloom = context.createRadialGradient(
-      canvas.width * 0.52,
-      canvas.height * 0.8,
-      canvas.width * 0.04,
-      canvas.width * 0.52,
-      canvas.height * 0.8,
-      canvas.width * 0.42
-    );
-    cyanBloom.addColorStop(0, "rgba(42,223,255,0.24)");
-    cyanBloom.addColorStop(0.52, "rgba(42,223,255,0.1)");
-    cyanBloom.addColorStop(1, "rgba(42,223,255,0)");
-    context.fillStyle = cyanBloom;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-
-    const magentaBloom = context.createRadialGradient(
-      canvas.width * 0.22,
-      canvas.height * 0.24,
-      canvas.width * 0.03,
-      canvas.width * 0.22,
-      canvas.height * 0.24,
-      canvas.width * 0.3
-    );
-    magentaBloom.addColorStop(0, "rgba(255,92,214,0.18)");
-    magentaBloom.addColorStop(0.58, "rgba(255,92,214,0.08)");
-    magentaBloom.addColorStop(1, "rgba(255,92,214,0)");
-    context.fillStyle = magentaBloom;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-
-    neonSkyTexture = new THREE.CanvasTexture(canvas);
-    neonSkyTexture.colorSpace = THREE.SRGBColorSpace;
-    neonSkyTexture.needsUpdate = true;
-  }
-  return neonSkyTexture;
-}
-
 function getSynthwaveSunTexture() {
   if (!synthwaveSunTexture) {
     const canvas = document.createElement("canvas");
@@ -395,28 +411,6 @@ function getSynthwaveSunTexture() {
     synthwaveSunTexture.needsUpdate = true;
   }
   return synthwaveSunTexture;
-}
-
-function getSynthwaveSkyTexture() {
-  if (!synthwaveSkyTexture) {
-    const canvas = document.createElement("canvas");
-    canvas.width = 1024;
-    canvas.height = 1024;
-    const context = canvas.getContext("2d")!;
-
-    const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
-    gradient.addColorStop(0, "rgba(111, 204, 255, 0.92)");
-    gradient.addColorStop(0.42, "rgba(159, 223, 255, 0.78)");
-    gradient.addColorStop(0.76, "rgba(255, 231, 186, 0.4)");
-    gradient.addColorStop(1, "rgba(255, 214, 150, 0)");
-    context.fillStyle = gradient;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-
-    synthwaveSkyTexture = new THREE.CanvasTexture(canvas);
-    synthwaveSkyTexture.colorSpace = THREE.SRGBColorSpace;
-    synthwaveSkyTexture.needsUpdate = true;
-  }
-  return synthwaveSkyTexture;
 }
 
 function applyFaceTextureFrame(texture: THREE.Texture) {
@@ -655,6 +649,8 @@ function normalizeAvatarRoot(root: THREE.Object3D) {
 class AvatarView {
   group: THREE.Group;
   modelRoot: THREE.Object3D;
+  baseColor: THREE.Color;
+  currentThemeId: ArenaThemeId;
   mixer: THREE.AnimationMixer;
   actions: Record<AvatarActionName, THREE.AnimationAction>;
   actionState: AvatarActionName = "idle";
@@ -685,8 +681,10 @@ class AvatarView {
   debugMode = false;
   ownedMaterials: THREE.Material[];
 
-  constructor(scene: THREE.Scene, asset: AvatarAsset, color: string, shadowsEnabled: boolean) {
+  constructor(scene: THREE.Scene, asset: AvatarAsset, color: string, shadowsEnabled: boolean, themeId: ArenaThemeId) {
     this.group = new THREE.Group();
+    this.baseColor = new THREE.Color(color);
+    this.currentThemeId = themeId;
     this.modelRoot = cloneSkinned(asset.template);
     const normalizedAvatar = normalizeAvatarRoot(this.modelRoot);
     this.avatarHeight = normalizedAvatar.height;
@@ -700,6 +698,7 @@ class AvatarView {
       }
     });
     this.ownedMaterials = recolorAvatarMaterials(this.modelRoot, color, asset.materialHslByName);
+    applyAvatarThemeMaterials(this.ownedMaterials, themeId, this.baseColor);
     this.group.add(this.modelRoot);
 
     this.faceMaskAnchor = new THREE.Group();
@@ -734,6 +733,7 @@ class AvatarView {
     this.faceMaskInner.renderOrder = 13;
     this.faceMaskGroup.add(this.faceMaskOuter, this.faceMaskInner);
     this.faceMaskAnchor.add(this.faceMaskGroup);
+    this.applyTheme(themeId);
     this.debugHeadHookMaterial = new THREE.MeshBasicMaterial({
       color: "#ff00ff",
       depthTest: false,
@@ -804,6 +804,11 @@ class AvatarView {
 
     this.group.add(this.label);
     scene.add(this.group);
+  }
+
+  applyTheme(themeId: ArenaThemeId) {
+    this.currentThemeId = themeId;
+    applyAvatarThemeMaterials(this.ownedMaterials, themeId, this.baseColor, this.faceMaskOuterMaterial);
   }
 
   setDebugMode(enabled: boolean) {
@@ -1034,6 +1039,7 @@ export class ArenaView {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
   textureLoader: THREE.TextureLoader;
+  pmremGenerator: THREE.PMREMGenerator | null = null;
   hemisphereLight: THREE.HemisphereLight | null = null;
   sunlight: THREE.DirectionalLight | null = null;
   avatarAsset: AvatarAsset | null = null;
@@ -1058,10 +1064,8 @@ export class ArenaView {
   neonThemeWaveRings: THREE.Mesh[] = [];
   neonThemeFloatingCubes: THREE.InstancedMesh | null = null;
   neonThemeCubeData: ThemeCubeDatum[] = [];
-  neonThemeSky: THREE.Mesh | null = null;
   neonThemeGroundGlow: THREE.Mesh | null = null;
   synthwaveThemeGroundGlow: THREE.Mesh | null = null;
-  synthwaveThemeSky: THREE.Mesh | null = null;
   synthwaveThemeSun: THREE.Mesh | null = null;
   synthwaveThemeParticles: THREE.Points | null = null;
   synthwaveThemeParticleData: ThemeParticleDatum[] = [];
@@ -1070,6 +1074,14 @@ export class ArenaView {
   synthwaveThemeFloatingCubes: THREE.InstancedMesh | null = null;
   synthwaveThemeCubeData: ThemeCubeDatum[] = [];
   synthwaveThemeGrids: THREE.GridHelper[] = [];
+  neonPanoramaTexture: THREE.Texture | null = null;
+  neonPanoramaEnvironmentTarget: THREE.WebGLRenderTarget | null = null;
+  neonPanoramaEnvironmentMap: THREE.Texture | null = null;
+  neonPanoramaLoadPromise: Promise<void> | null = null;
+  synthwavePanoramaTexture: THREE.Texture | null = null;
+  synthwavePanoramaEnvironmentTarget: THREE.WebGLRenderTarget | null = null;
+  synthwavePanoramaEnvironmentMap: THREE.Texture | null = null;
+  synthwavePanoramaLoadPromise: Promise<void> | null = null;
   state: RoundState | null = null;
   themeElapsedSeconds = 0;
   rafId = 0;
@@ -1108,6 +1120,8 @@ export class ArenaView {
     this.renderer.setPixelRatio(1);
     this.renderer.shadowMap.enabled = mode === "spectator";
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.pmremGenerator = new THREE.PMREMGenerator(this.renderer);
+    this.pmremGenerator.compileEquirectangularShader();
 
     this.scene = new THREE.Scene();
     this.scene.background = NEON_SCENE_BACKGROUND_COLOR.clone();
@@ -1125,6 +1139,8 @@ export class ArenaView {
     this.buildScene();
     this.setTheme(DEFAULT_ARENA_THEME_ID);
     this.updateThemeBackdrop(0);
+    void this.ensureNeonPanoramaAssets();
+    void this.ensureSynthwavePanoramaAssets();
     void this.ensureAvatarAsset();
     this.resize();
     window.addEventListener("resize", this.resize);
@@ -1144,6 +1160,62 @@ export class ArenaView {
       this.avatarAssetError = error instanceof Error ? error : new Error("Failed to load GreenRobot.glb");
       console.error("[shutter-shy] failed to load GreenRobot avatar", this.avatarAssetError);
     }
+  }
+
+  async ensureNeonPanoramaAssets() {
+    if (this.neonPanoramaLoadPromise) {
+      return this.neonPanoramaLoadPromise;
+    }
+
+    this.neonPanoramaLoadPromise = this.textureLoader.loadAsync(NEON_PANORAMA_URL)
+      .then((texture) => {
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.mapping = THREE.EquirectangularReflectionMapping;
+        this.neonPanoramaTexture = texture;
+
+        this.neonPanoramaEnvironmentTarget = this.pmremGenerator?.fromEquirectangular(texture) || null;
+        this.neonPanoramaEnvironmentMap = this.neonPanoramaEnvironmentTarget?.texture || null;
+
+        if (!this.spectatorContrastMode && this.activeThemeId === "neon") {
+          this.applySceneThemePalette("neon");
+        }
+        if (!this.active) {
+          this.renderStillFrame();
+        }
+      })
+      .catch((error) => {
+        console.warn("[shutter-shy] failed to load neon panorama", error);
+      });
+
+    return this.neonPanoramaLoadPromise;
+  }
+
+  async ensureSynthwavePanoramaAssets() {
+    if (this.synthwavePanoramaLoadPromise) {
+      return this.synthwavePanoramaLoadPromise;
+    }
+
+    this.synthwavePanoramaLoadPromise = this.textureLoader.loadAsync(SYNTHWAVE_PANORAMA_URL)
+      .then((texture) => {
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.mapping = THREE.EquirectangularReflectionMapping;
+        this.synthwavePanoramaTexture = texture;
+
+        this.synthwavePanoramaEnvironmentTarget = this.pmremGenerator?.fromEquirectangular(texture) || null;
+        this.synthwavePanoramaEnvironmentMap = this.synthwavePanoramaEnvironmentTarget?.texture || null;
+
+        if (!this.spectatorContrastMode && this.activeThemeId === "synthwave") {
+          this.applySceneThemePalette("synthwave");
+        }
+        if (!this.active) {
+          this.renderStillFrame();
+        }
+      })
+      .catch((error) => {
+        console.warn("[shutter-shy] failed to load synthwave panorama", error);
+      });
+
+    return this.synthwavePanoramaLoadPromise;
   }
 
   applyRenderProfile() {
@@ -1212,27 +1284,36 @@ export class ArenaView {
   };
 
   applySceneThemePalette(themeId: ArenaThemeId) {
-    const background = themeId === "synthwave" ? SYNTHWAVE_SCENE_BACKGROUND_COLOR : NEON_SCENE_BACKGROUND_COLOR;
-    this.scene.background = background.clone();
+    if (themeId === "neon" && this.neonPanoramaTexture) {
+      this.scene.background = this.neonPanoramaTexture;
+      this.scene.environment = this.neonPanoramaEnvironmentMap;
+    } else if (themeId === "synthwave" && this.synthwavePanoramaTexture) {
+      this.scene.background = this.synthwavePanoramaTexture;
+      this.scene.environment = this.synthwavePanoramaEnvironmentMap;
+    } else {
+      const background = themeId === "synthwave" ? SYNTHWAVE_SCENE_BACKGROUND_COLOR : NEON_SCENE_BACKGROUND_COLOR;
+      this.scene.background = background.clone();
+      this.scene.environment = null;
+    }
     if (this.hemisphereLight) {
       if (themeId === "synthwave") {
-        this.hemisphereLight.color.set("#f7fbff");
-        this.hemisphereLight.groundColor.set("#f1c6a1");
-        this.hemisphereLight.intensity = 1.86;
+        this.hemisphereLight.color.set("#fff2e4");
+        this.hemisphereLight.groundColor.set("#ffcbb1");
+        this.hemisphereLight.intensity = 1.26;
       } else {
-        this.hemisphereLight.color.set("#7ea2ff");
-        this.hemisphereLight.groundColor.set("#050914");
-        this.hemisphereLight.intensity = 1.28;
+        this.hemisphereLight.color.set("#96b7ff");
+        this.hemisphereLight.groundColor.set("#090d18");
+        this.hemisphereLight.intensity = 1.12;
       }
     }
     if (this.sunlight) {
       if (themeId === "synthwave") {
-        this.sunlight.color.set("#ffe0a8");
-        this.sunlight.intensity = 1.82;
+        this.sunlight.color.set("#ffe3bf");
+        this.sunlight.intensity = 1.18;
         this.sunlight.position.set(14, 26, 8);
       } else {
-        this.sunlight.color.set("#ffd9fb");
-        this.sunlight.intensity = 1.42;
+        this.sunlight.color.set("#ffbadc");
+        this.sunlight.intensity = 1.18;
         this.sunlight.position.set(9, 20, 12);
       }
     }
@@ -1252,54 +1333,62 @@ export class ArenaView {
         const role = node.userData.spectatorDiagnosticRole;
         if (themeId === "synthwave") {
           if (role === "plaza") {
-            material.color.set("#f8fbff");
-            material.emissive.set("#000000");
-            material.emissiveIntensity = 0;
-            material.roughness = 0.9;
-            material.metalness = 0.05;
+            material.color.set("#ffd9b8");
+            material.emissive.set("#ffbf99");
+            material.emissiveIntensity = 0.03;
+            material.roughness = 0.68;
+            material.metalness = 0.02;
+            material.envMapIntensity = 0.08;
           } else if (role === "ring") {
-            material.color.set("#ffd98a");
-            material.emissive.set("#000000");
-            material.emissiveIntensity = 0;
-            material.roughness = 0.82;
-            material.metalness = 0.1;
+            material.color.set("#ffd478");
+            material.emissive.set("#ff9fc7");
+            material.emissiveIntensity = 0.07;
+            material.roughness = 0.5;
+            material.metalness = 0.04;
+            material.envMapIntensity = 0.12;
           } else if (role === "pedestal") {
-            material.color.set("#ffb59f");
-            material.emissive.set("#000000");
-            material.emissiveIntensity = 0;
-            material.roughness = 0.72;
-            material.metalness = 0.08;
+            material.color.set("#ffb8a6");
+            material.emissive.set("#ff88b5");
+            material.emissiveIntensity = 0.08;
+            material.roughness = 0.52;
+            material.metalness = 0.03;
+            material.envMapIntensity = 0.1;
           } else if (role === "fountain-base") {
-            material.color.set("#7ed6ff");
-            material.emissive.set("#a3efff");
+            material.color.set("#8fdfdd");
+            material.emissive.set("#76dfff");
             material.emissiveIntensity = 0.18;
-            material.roughness = 0.26;
-            material.metalness = 0.06;
+            material.roughness = 0.24;
+            material.metalness = 0.02;
+            material.envMapIntensity = 0.14;
           }
         } else if (role === "plaza") {
-          material.color.set("#294774");
-          material.emissive.set("#0a1834");
-          material.emissiveIntensity = 0.16;
-          material.roughness = 0.88;
-          material.metalness = 0.1;
+          material.color.set("#263147");
+          material.emissive.set("#0c1631");
+          material.emissiveIntensity = 0.12;
+          material.roughness = 0.28;
+          material.metalness = 0.2;
+          material.envMapIntensity = 0.28;
         } else if (role === "ring") {
-          material.color.set("#5f8fc4");
-          material.emissive.set("#16345c");
-          material.emissiveIntensity = 0.24;
-          material.roughness = 0.84;
+          material.color.set("#5e4a78");
+          material.emissive.set("#1e4c78");
+          material.emissiveIntensity = 0.18;
+          material.roughness = 0.24;
           material.metalness = 0.18;
+          material.envMapIntensity = 0.34;
         } else if (role === "pedestal") {
-          material.color.set("#79a3d9");
-          material.emissive.set("#11274b");
-          material.emissiveIntensity = 0.2;
-          material.roughness = 0.72;
+          material.color.set("#7e5d85");
+          material.emissive.set("#3d1e4d");
+          material.emissiveIntensity = 0.16;
+          material.roughness = 0.22;
           material.metalness = 0.14;
+          material.envMapIntensity = 0.3;
         } else if (role === "fountain-base") {
-          material.color.set("#1a4567");
-          material.emissive.set("#1762d8");
-          material.emissiveIntensity = 0.3;
-          material.roughness = 0.34;
-          material.metalness = 0.1;
+          material.color.set("#173846");
+          material.emissive.set("#36c8f3");
+          material.emissiveIntensity = 0.24;
+          material.roughness = 0.14;
+          material.metalness = 0.12;
+          material.envMapIntensity = 0.24;
         }
       }
     });
@@ -1309,6 +1398,9 @@ export class ArenaView {
     this.activeThemeId = normalizeThemeId(themeId || DEFAULT_ARENA_THEME_ID);
     if (!this.spectatorContrastMode) {
       this.applySceneThemePalette(this.activeThemeId);
+    }
+    for (const avatar of this.avatars.values()) {
+      avatar.applyTheme(this.activeThemeId);
     }
     if (!this.active) {
       this.renderStillFrame();
@@ -1424,21 +1516,6 @@ export class ArenaView {
   }
 
   buildNeonThemeBackdrop() {
-    this.neonThemeSky = new THREE.Mesh(
-      new THREE.PlaneGeometry(86, 50, 1, 1),
-      new THREE.MeshBasicMaterial({
-        map: getNeonSkyTexture(),
-        transparent: true,
-        opacity: 0.88,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-        toneMapped: false
-      })
-    );
-    this.neonThemeSky.position.set(0, 16.5, -46);
-    this.neonThemeSky.renderOrder = -3;
-    this.neonBackdropGroup.add(this.neonThemeSky);
-
     this.neonThemeGroundGlow = new THREE.Mesh(
       new THREE.PlaneGeometry(THEME_GLOW_SIZE, THEME_GLOW_SIZE, 1, 1),
       new THREE.MeshBasicMaterial({
@@ -1516,11 +1593,12 @@ export class ArenaView {
 
     const cubeGeometry = new THREE.BoxGeometry(1, 1, 1);
     const cubeMaterial = new THREE.MeshStandardMaterial({
-      color: "#ffffff",
-      emissive: "#2ddfff",
-      emissiveIntensity: 0.58,
-      roughness: 0.26,
-      metalness: 0.12
+      color: "#b9cbff",
+      emissive: "#5cdbff",
+      emissiveIntensity: 0.2,
+      roughness: 0.2,
+      metalness: 0.12,
+      envMapIntensity: 0.42
     });
     cubeMaterial.toneMapped = false;
     this.neonThemeFloatingCubes = new THREE.InstancedMesh(cubeGeometry, cubeMaterial, NEON_THEME_BACKDROP.floatingCubes.count);
@@ -1562,21 +1640,6 @@ export class ArenaView {
   }
 
   buildSynthwaveThemeBackdrop() {
-    this.synthwaveThemeSky = new THREE.Mesh(
-      new THREE.PlaneGeometry(86, 52, 1, 1),
-      new THREE.MeshBasicMaterial({
-        map: getSynthwaveSkyTexture(),
-        transparent: true,
-        opacity: 0.72,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-        toneMapped: false
-      })
-    );
-    this.synthwaveThemeSky.position.set(0, 17.5, -48);
-    this.synthwaveThemeSky.renderOrder = -3;
-    this.synthwaveBackdropGroup.add(this.synthwaveThemeSky);
-
     this.synthwaveThemeGroundGlow = new THREE.Mesh(
       new THREE.PlaneGeometry(THEME_GLOW_SIZE + 6, THEME_GLOW_SIZE + 6, 1, 1),
       new THREE.MeshBasicMaterial({
@@ -1726,11 +1789,12 @@ export class ArenaView {
 
     const cubeGeometry = new THREE.BoxGeometry(1, 1, 1);
     const cubeMaterial = new THREE.MeshStandardMaterial({
-      color: "#ffffff",
-      emissive: "#ffd3b4",
-      emissiveIntensity: 0.12,
-      roughness: 0.42,
-      metalness: 0.04
+      color: "#ffdcb4",
+      emissive: "#ffcfd8",
+      emissiveIntensity: 0.06,
+      roughness: 0.46,
+      metalness: 0.02,
+      envMapIntensity: 0.16
     });
     this.synthwaveThemeFloatingCubes = new THREE.InstancedMesh(
       cubeGeometry,
@@ -1873,9 +1937,6 @@ export class ArenaView {
       }
     }
 
-    if (this.neonThemeSky?.material instanceof THREE.MeshBasicMaterial) {
-      this.neonThemeSky.material.opacity = 0.84 + Math.sin(elapsedSeconds * 0.04) * 0.03;
-    }
     if (this.neonThemeGroundGlow?.material instanceof THREE.MeshBasicMaterial) {
       this.neonThemeGroundGlow.material.opacity = 0.22 + Math.sin(elapsedSeconds * 0.18) * 0.02;
     }
@@ -1939,9 +2000,6 @@ export class ArenaView {
 
     if (this.synthwaveThemeGroundGlow?.material instanceof THREE.MeshBasicMaterial) {
       this.synthwaveThemeGroundGlow.material.opacity = 0.1 + Math.sin(elapsedSeconds * 0.22) * 0.015;
-    }
-    if (this.synthwaveThemeSky?.material instanceof THREE.MeshBasicMaterial) {
-      this.synthwaveThemeSky.material.opacity = 0.68 + Math.sin(elapsedSeconds * 0.05) * 0.02;
     }
     if (this.synthwaveThemeSun?.material instanceof THREE.MeshBasicMaterial) {
       this.synthwaveThemeSun.material.opacity = 0.94 + Math.sin(elapsedSeconds * 0.08) * 0.015;
@@ -2011,11 +2069,7 @@ export class ArenaView {
             cube.tilt * 0.7
           );
           tempThemeTransform.scale.setScalar(cube.size);
-          tempThemeColor.setHSL(
-            cube.tintMix > 0.56 ? 0.55 : 0.08,
-            cube.tintMix > 0.56 ? 0.66 : 0.72,
-            0.68 + Math.sin(elapsedSeconds * 0.2 + cube.phase) * 0.05
-          );
+          tempThemeColor.copy(getSynthwaveCubeColor(cube.tintMix, elapsedSeconds, cube.phase));
           this.synthwaveThemeFloatingCubes.setColorAt(index, tempThemeColor);
         } else {
           tempThemeTransform.position.set(0, -100, 0);
@@ -2083,13 +2137,14 @@ export class ArenaView {
       }
       let avatar = this.avatars.get(player.id);
       if (!avatar && this.avatarAsset) {
-        avatar = new AvatarView(this.scene, this.avatarAsset, player.color, this.renderer.shadowMap.enabled);
+        avatar = new AvatarView(this.scene, this.avatarAsset, player.color, this.renderer.shadowMap.enabled, this.activeThemeId);
         avatar.setDebugMode(this.avatarDebugMode);
         this.avatars.set(player.id, avatar);
       }
       if (!avatar) {
         continue;
       }
+      avatar.applyTheme(this.activeThemeId);
       avatar.update(player, this.textureLoader);
       avatar.group.visible = !(this.mode === "controller" && this.focusPlayerId === player.id);
       if (this.mode === "spectator" && this.spectatorContrastMode) {
@@ -2328,10 +2383,6 @@ export class ArenaView {
       });
       this.spectatorDiagnosticState = null;
     }
-    this.neonThemeSky?.geometry.dispose();
-    if (this.neonThemeSky?.material instanceof THREE.Material) {
-      this.neonThemeSky.material.dispose();
-    }
     this.neonThemeGroundGlow?.geometry.dispose();
     if (this.neonThemeGroundGlow?.material instanceof THREE.Material) {
       this.neonThemeGroundGlow.material.dispose();
@@ -2353,10 +2404,6 @@ export class ArenaView {
     this.synthwaveThemeGroundGlow?.geometry.dispose();
     if (this.synthwaveThemeGroundGlow?.material instanceof THREE.Material) {
       this.synthwaveThemeGroundGlow.material.dispose();
-    }
-    this.synthwaveThemeSky?.geometry.dispose();
-    if (this.synthwaveThemeSky?.material instanceof THREE.Material) {
-      this.synthwaveThemeSky.material.dispose();
     }
     this.synthwaveThemeSun?.geometry.dispose();
     if (this.synthwaveThemeSun?.material instanceof THREE.Material) {
@@ -2383,6 +2430,13 @@ export class ArenaView {
         }
       }
     }
+    this.scene.background = null;
+    this.scene.environment = null;
+    this.neonPanoramaEnvironmentTarget?.dispose();
+    this.neonPanoramaTexture?.dispose();
+    this.synthwavePanoramaEnvironmentTarget?.dispose();
+    this.synthwavePanoramaTexture?.dispose();
+    this.pmremGenerator?.dispose();
     this.renderer.dispose();
   }
 }
