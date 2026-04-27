@@ -1,5 +1,6 @@
 import { FaceDetector, FilesetResolver } from "@mediapipe/tasks-vision";
 import { ArenaView } from "../common/scene";
+import { installViewportCssVars } from "../common/viewport";
 import {
   ARENA,
   CLIENT_TYPES,
@@ -84,6 +85,7 @@ const elements = {
   roleRoomStatus: document.getElementById("role-room-status") as HTMLElement,
   permissionsTitle: document.getElementById("permissions-title") as HTMLElement,
   permissionsCopy: document.getElementById("permissions-copy") as HTMLElement,
+  rolePlayers: document.getElementById("role-players") as HTMLElement,
   runnerPermissions: document.getElementById("runner-permissions") as HTMLElement,
   photographerPermissions: document.getElementById("photographer-permissions") as HTMLElement,
   faceToggleButton: document.getElementById("face-toggle-button") as HTMLButtonElement,
@@ -109,6 +111,7 @@ const elements = {
   postRoundTitle: document.getElementById("post-round-title") as HTMLElement,
   postRoundCopy: document.getElementById("post-round-copy") as HTMLElement,
   postRoundSummary: document.getElementById("post-round-summary") as HTMLElement,
+  controllerReadybar: document.getElementById("controller-readybar") as HTMLElement,
   runnerPlayUi: document.getElementById("runner-play-ui") as HTMLElement,
   runnerPhaseCopy: document.getElementById("runner-phase-copy") as HTMLElement,
   runnerTimer: document.getElementById("runner-timer") as HTMLElement,
@@ -186,6 +189,25 @@ const state = {
   shutterInputLockUntil: 0,
   lastShutterTriggerAt: 0
 };
+
+installViewportCssVars({
+  freezeHeightOnKeyboard: true,
+  onChange: () => {
+    state.view.resize();
+  }
+});
+
+function keepFocusedFieldVisible(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+  if (!target.matches("input, textarea, select")) {
+    return;
+  }
+  window.setTimeout(() => {
+    target.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+  }, 180);
+}
 
 function debugLog(event: string, details: Record<string, unknown> = {}) {
   console.debug(`[shutter-shy] ${event}`, details);
@@ -503,13 +525,16 @@ function tryTriggerShutter(event?: Event) {
   }
   state.lastShutterTriggerAt = now;
   const createdAt = now;
+  const localShot = state.view.captureShot();
   state.shutterInputLockUntil = createdAt + getShutterCooldownMs();
   startShutterCooldown(createdAt);
   triggerFlash();
   send(MSG_TYPES.SHUTTER, {
-    imageDataUrl: state.view.capturePhoto(),
-    yaw: state.orientation.enabled ? state.orientation.yaw : state.view.fallbackYaw,
-    pitch: state.orientation.enabled ? state.orientation.pitch : state.view.fallbackPitch,
+    imageDataUrl: localShot.imageDataUrl,
+    yaw: localShot.yaw,
+    pitch: localShot.pitch,
+    capturedRunnerIds: localShot.capturedRunnerIds,
+    blockedRunnerIds: localShot.blockedRunnerIds,
     createdAt
   });
 }
@@ -739,6 +764,10 @@ function updateLiveFaceCanvases(source: CanvasImageSource) {
   drawFaceCanvas(elements.runnerFaceThumb, source);
 }
 
+function getFaceCaptureRotation(video: HTMLVideoElement) {
+  return 0;
+}
+
 function captureFaceFromBox(box: ReturnType<typeof extractFaceBox>) {
   if (!box || !state.faceStream) {
     return null;
@@ -751,7 +780,27 @@ function captureFaceFromBox(box: ReturnType<typeof extractFaceBox>) {
   if (!context) {
     return null;
   }
-  context.drawImage(video, box.cropX, box.cropY, box.cropSize, box.cropSize, 0, 0, canvas.width, canvas.height);
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  const rotation = getFaceCaptureRotation(video);
+  context.save();
+  if (rotation !== 0) {
+    context.translate(canvas.width / 2, canvas.height / 2);
+    context.rotate(rotation);
+    context.drawImage(
+      video,
+      box.cropX,
+      box.cropY,
+      box.cropSize,
+      box.cropSize,
+      -canvas.width / 2,
+      -canvas.height / 2,
+      canvas.width,
+      canvas.height
+    );
+  } else {
+    context.drawImage(video, box.cropX, box.cropY, box.cropSize, box.cropSize, 0, 0, canvas.width, canvas.height);
+  }
+  context.restore();
   return canvas.toDataURL("image/jpeg", 0.82);
 }
 
@@ -1213,29 +1262,31 @@ function setMoveDirection(nextDirection: number) {
 
 function renderPlayers() {
   const players = state.lobby?.players || [];
-  elements.permissionPlayers.innerHTML = "";
-  if (players.length === 0) {
-    elements.permissionPlayers.innerHTML = `<div class="empty-state">${COPY.controller.permissionPlayersEmpty}</div>`;
-    return;
-  }
-  for (const player of players) {
-    const card = document.createElement("div");
-    const setupLabel = player.role === ROLES.PHOTOGRAPHER
-      ? (player.setup?.motionReady ? COPY.controller.setupMotionReady : COPY.controller.setupNeedMotion)
-      : player.role === ROLES.RUNNER
-        ? (player.setup?.faceEnabled
-          ? (player.setup?.faceReady ? COPY.controller.setupFaceReady : COPY.controller.setupNeedFace)
-          : COPY.controller.setupFaceOff)
-        : COPY.controller.setupChooseRole;
-    card.className = "player-chip";
-    card.innerHTML = `
-      <div>
-        <strong>${player.name}</strong>
-        <div class="status-copy">${formatRoleLabel(player.role)} · ${setupLabel}</div>
-      </div>
-      <div class="badge">${player.ready ? COPY.common.ready : `${player.loadProgress}%`}</div>
-    `;
-    elements.permissionPlayers.append(card);
+  for (const list of [elements.rolePlayers, elements.permissionPlayers]) {
+    list.innerHTML = "";
+    if (players.length === 0) {
+      list.innerHTML = `<div class="empty-state">${COPY.controller.permissionPlayersEmpty}</div>`;
+      continue;
+    }
+    for (const player of players) {
+      const card = document.createElement("div");
+      const setupLabel = player.role === ROLES.PHOTOGRAPHER
+        ? (player.setup?.motionReady ? COPY.controller.setupMotionReady : COPY.controller.setupNeedMotion)
+        : player.role === ROLES.RUNNER
+          ? (player.setup?.faceEnabled
+            ? (player.setup?.faceReady ? COPY.controller.setupFaceReady : COPY.controller.setupNeedFace)
+            : COPY.controller.setupFaceOff)
+          : COPY.controller.setupChooseRole;
+      card.className = "player-chip";
+      card.innerHTML = `
+        <div>
+          <strong>${player.name}</strong>
+          <div class="status-copy">${formatRoleLabel(player.role)} · ${setupLabel}</div>
+        </div>
+        <div class="badge">${player.ready ? COPY.common.ready : `${player.loadProgress}%`}</div>
+      `;
+      list.append(card);
+    }
   }
 }
 
@@ -1292,7 +1343,25 @@ function renderThemePicker(effectiveRole: string | null) {
 
 function renderGallery() {
   const snapshot = state.downloadsSnapshot || state.gallery;
-  const items = snapshot?.items || [];
+  const items = [...(snapshot?.items || [])].sort((left: any, right: any) => {
+    const leftSuccessful = left?.successful !== false && (left?.capturedRunnerIds?.length || 0) > 0;
+    const rightSuccessful = right?.successful !== false && (right?.capturedRunnerIds?.length || 0) > 0;
+    if (leftSuccessful !== rightSuccessful) {
+      return leftSuccessful ? -1 : 1;
+    }
+    return Number(right?.createdAt || 0) - Number(left?.createdAt || 0);
+  });
+  const runnerNameMap = new Map<string, string>();
+  for (const entry of snapshot?.runnerSummary || []) {
+    if (entry?.id && entry?.name) {
+      runnerNameMap.set(entry.id, entry.name);
+    }
+  }
+  for (const player of state.round?.players || state.lobby?.players || []) {
+    if (player?.id && player?.name && !runnerNameMap.has(player.id)) {
+      runnerNameMap.set(player.id, player.name);
+    }
+  }
   elements.gallery.innerHTML = "";
   if (items.length === 0) {
     elements.gallery.innerHTML = `<div class="empty-state">${COPY.controller.noSuccessfulCaptures}</div>`;
@@ -1300,16 +1369,29 @@ function renderGallery() {
   }
   for (const item of items) {
     const card = document.createElement("a");
-    card.className = "gallery-card gallery-tile";
+    const successful = item.successful !== false && (item.capturedRunnerIds?.length || 0) > 0;
+    card.className = `gallery-card gallery-tile ${successful ? "successful" : "missed"}`;
     card.href = item.imageDataUrl;
     card.download = `shutter-shy-${item.id}.jpg`;
     card.target = "_blank";
     card.rel = "noreferrer";
+    const capturedCount = item.capturedRunnerIds?.length || 0;
+    const blockedCount = item.blockedRunnerIds?.length || 0;
+    const capturedNames = (item.capturedRunnerIds || [])
+      .map((runnerId: string) => runnerNameMap.get(runnerId))
+      .filter(Boolean);
+    const capturedLine = successful
+      ? (capturedNames.length > 0 ? capturedNames.join("、") : COPY.controller.capturedCount(capturedCount))
+      : "沒有拍到跑者";
     card.innerHTML = `
-      ${item.imageDataUrl ? `<img src="${item.imageDataUrl}" alt="${COPY.controller.successfulPhotoAlt}" />` : `<div class="empty-state">${COPY.controller.noPreview}</div>`}
+      ${item.imageDataUrl ? `<img src="${item.imageDataUrl}" alt="${successful ? COPY.controller.successfulPhotoAlt : COPY.controller.missedPhotoAlt}" />` : `<div class="empty-state">${COPY.controller.noPreview}</div>`}
       <div class="meta">
-        <strong>${COPY.controller.capturedCount(item.capturedRunnerIds.length)}</strong>
-        <div class="status-copy">${new Date(item.createdAt).toLocaleTimeString()}</div>
+        <div class="meta-row">
+          <span class="meta-label">${successful ? COPY.controller.shotHit : COPY.controller.shotMiss}</span>
+          <span class="meta-time status-copy">${new Date(item.createdAt).toLocaleTimeString()}</span>
+        </div>
+        <strong class="meta-primary">${capturedLine}</strong>
+        ${blockedCount > 0 ? `<div class="status-copy">${COPY.controller.blockedCount(blockedCount)}</div>` : ""}
       </div>
     `;
     elements.gallery.append(card);
@@ -1321,8 +1403,11 @@ function renderPostRoundSummary() {
   elements.postRoundSummary.innerHTML = "";
   for (const entry of summary) {
     const badge = document.createElement("div");
-    badge.className = `badge ${entry.captured ? "good" : "bad"}`;
-    badge.textContent = `${entry.name}：${entry.captured ? COPY.controller.summaryCaptured : COPY.controller.summaryEscaped}`;
+    badge.className = `result-badge-card ${entry.captured ? "good" : "bad"}`;
+    badge.innerHTML = `
+      <div class="result-badge-name">${entry.name}</div>
+      <div class="result-badge-state ${entry.captured ? "good" : "bad"}">${entry.captured ? COPY.controller.summaryCaptured : COPY.controller.summaryEscaped}</div>
+    `;
     elements.postRoundSummary.append(badge);
   }
   if (summary.length === 0) {
@@ -1340,6 +1425,7 @@ function renderTop(step: ControllerStep) {
   elements.topStateDot.className = `top-dot ${dotClass}`;
   elements.leaveButton.classList.toggle("hidden", !state.joined);
   elements.app.classList.toggle("playing-photographer", step === "playing-photographer");
+  elements.app.classList.toggle("with-readybar", step === "permissions");
 }
 
 function updateRuntimeForStep(step: ControllerStep) {
@@ -1409,6 +1495,7 @@ function render() {
   elements.readyScreen.classList.add("hidden");
   elements.countdownScreen.classList.toggle("hidden", step !== "countdown");
   elements.postRoundScreen.classList.toggle("hidden", step !== "post-round");
+  elements.controllerReadybar.classList.toggle("hidden", step !== "permissions");
   elements.flowStage.classList.toggle("hidden", step === "playing-runner" || step === "playing-photographer");
   elements.runnerPlayUi.classList.toggle("hidden", step !== "playing-runner");
   elements.photographerPlayUi.classList.toggle("hidden", step !== "playing-photographer");
@@ -1421,6 +1508,8 @@ function render() {
   elements.photographerRole.disabled = photographerTakenByOther || Boolean(state.pendingRole);
   elements.runnerRole.disabled = Boolean(state.pendingRole);
   elements.photographerRole.classList.toggle("locked", photographerTakenByOther);
+  elements.photographerRole.classList.toggle("selected", effectiveRole === ROLES.PHOTOGRAPHER);
+  elements.runnerRole.classList.toggle("selected", effectiveRole === ROLES.RUNNER);
   elements.roleStatus.textContent = photographerTakenByOther
     ? COPY.controller.photographerTaken
     : COPY.controller.chooseRole;
@@ -1465,9 +1554,25 @@ function render() {
   elements.photographerSetupStatus.textContent = isMotionReady(selfPlayer)
     ? COPY.controller.motionReady
     : COPY.controller.motionRequired;
-  elements.motionButton.disabled = state.pendingMotionPermission;
-  elements.permissionsNextButton.disabled = !isPermissionComplete(selfPlayer) || Boolean(state.pendingReady);
-  elements.permissionsNextButton.textContent = effectiveReady ? COPY.common.cancelReady : COPY.common.ready;
+  const motionReady = isMotionReady(selfPlayer);
+  elements.motionButton.disabled = state.pendingMotionPermission || motionReady;
+  elements.motionButton.classList.toggle("variant-key", !motionReady);
+  elements.motionButton.classList.toggle("variant-finished", motionReady);
+  elements.motionButton.textContent = motionReady ? COPY.controller.motionReady : "啟用動作感應";
+  const permissionComplete = isPermissionComplete(selfPlayer);
+  if (effectiveReady) {
+    elements.permissionsNextButton.disabled = true;
+    elements.permissionsNextButton.dataset.state = "finished";
+    elements.permissionsNextButton.textContent = COPY.controller.readyFinished;
+  } else if (permissionComplete) {
+    elements.permissionsNextButton.disabled = Boolean(state.pendingReady);
+    elements.permissionsNextButton.dataset.state = "ready";
+    elements.permissionsNextButton.textContent = COPY.common.ready;
+  } else {
+    elements.permissionsNextButton.disabled = true;
+    elements.permissionsNextButton.dataset.state = "waiting";
+    elements.permissionsNextButton.textContent = COPY.controller.enablePermissionsToContinue;
+  }
   if (state.lastInlineError) {
     if (effectiveRole === ROLES.PHOTOGRAPHER) {
       elements.photographerSetupStatus.textContent = state.lastInlineError;
@@ -1559,10 +1664,10 @@ for (const [button, themeId] of [
 }
 elements.permissionsNextButton.addEventListener("click", () => {
   const selfPlayer = getSelfPlayer();
-  if (!isPermissionComplete(selfPlayer)) {
+  if (!isPermissionComplete(selfPlayer) || isEffectiveReady(selfPlayer)) {
     return;
   }
-  const nextReady = !isEffectiveReady(selfPlayer);
+  const nextReady = true;
   state.pendingReady = { value: nextReady, sinceRevision: state.lobbyRevision };
   setInlineError("");
   render();
@@ -1590,6 +1695,9 @@ function handleCloseGalleryTap(event?: Event) {
 elements.closeDownloadsButton.addEventListener("pointerup", handleCloseGalleryTap);
 elements.closeDownloadsButton.addEventListener("touchend", handleCloseGalleryTap, { passive: false });
 elements.closeDownloadsButton.addEventListener("click", handleCloseGalleryTap);
+elements.flowStage.addEventListener("focusin", (event) => {
+  keepFocusedFieldVisible(event.target);
+});
 elements.shutterButton.addEventListener("pointerdown", tryTriggerShutter);
 elements.shutterButton.addEventListener("touchstart", tryTriggerShutter, { passive: false });
 elements.shutterButton.addEventListener("click", (event) => {

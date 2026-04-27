@@ -155,6 +155,7 @@ export const ARENA = {
   obstructionAnglePadding: 0.22,
   runnerBodyAnglePadding: 0.09,
   obstructionCoverageThreshold: 0.8,
+  captureVisibilityThreshold: 0.55,
   obstructionPulseMs: 1600,
   countdownLeadMs: COUNTDOWN_SECONDS * 1000
 };

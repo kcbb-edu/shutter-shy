@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { ARENA, DEFAULT_ARENA_THEME_ID, ROLES, normalizeAngle } from "../../shared/protocol.js";
+import { evaluateCaptureSnapshot } from "./captureSnapshot.js";
 import { getProjectedPointBounds, getSpectatorFramingGeometry } from "./spectatorFraming.js";
 import { applySpectatorDiagnosticPalette, restoreSpectatorDiagnosticPalette } from "./spectatorDiagnostic.js";
 
@@ -76,6 +77,20 @@ type ThemeMountainDatum = {
   tintMix: number;
 };
 
+type CaptureSnapshotTarget = {
+  id: string;
+  samplePoints: THREE.Vector3[];
+  raycastObjects: THREE.Object3D[];
+};
+
+type CaptureShotResult = {
+  imageDataUrl: string;
+  capturedRunnerIds: string[];
+  blockedRunnerIds: string[];
+  yaw: number;
+  pitch: number;
+};
+
 const GREEN_ROBOT_URL = "/models/GreenRobot.glb";
 const NEON_PANORAMA_URL = "/environments/neon-city-panorama.png";
 const SYNTHWAVE_PANORAMA_URL = "/environments/rainbow-park-panorama.png";
@@ -106,6 +121,9 @@ const FOUNTAIN_JET_MAX_SCALE_Y = 0.7;
 const FOUNTAIN_JET_ANIMATION_LERP = 0.14;
 const ACTION_FADE_SECONDS = 0.18;
 const MOVEMENT_EPSILON = 0.0008;
+const AVATAR_VISUAL_ANGLE_LERP_SPEED = 10;
+const AVATAR_VISUAL_RADIUS_LERP_SPEED = 14;
+const AVATAR_VISUAL_YAW_LERP_SPEED = 12;
 const MODEL_FORWARD_YAW_OFFSET = Math.PI;
 const RUNNER_TURN_YAW_OFFSET = Math.PI / 4;
 const PHOTOGRAPHER_YAW_OFFSET = -Math.PI / 2;
@@ -194,6 +212,7 @@ const tempAnchorWorldPosition = new THREE.Vector3();
 const tempAnchorLocalPosition = new THREE.Vector3();
 const tempThemeTransform = new THREE.Object3D();
 const tempThemeColor = new THREE.Color();
+const CAPTURE_PROXY_LAYER = 1;
 
 function polarToPosition(angle: number, radius: number, height = 0) {
   return new THREE.Vector3(Math.cos(angle) * radius, height, Math.sin(angle) * radius);
@@ -241,6 +260,10 @@ function getSynthwaveCubeColor(tintMix: number, elapsedSeconds: number, phase: n
     .offsetHSL(0, 0, Math.sin(elapsedSeconds * 0.22 + phase) * 0.03);
 }
 
+function getSmoothingAlpha(deltaSeconds: number, speed: number) {
+  return 1 - Math.exp(-Math.max(0, deltaSeconds) * speed);
+}
+
 function applyAvatarThemeMaterials(
   materials: THREE.Material[],
   themeId: ArenaThemeId,
@@ -266,17 +289,17 @@ function applyAvatarThemeMaterials(
     if (themeId === "synthwave") {
       material.color.lerp(themeAccent, 0.14).offsetHSL(0, -0.1, 0.08);
       material.emissive.copy(avatarBaseColor).lerp(themeShadow, 0.28).multiplyScalar(0.12);
-      material.emissiveIntensity = 0.32;
-      material.roughness = 0.7;
-      material.metalness = 0.02;
-      material.envMapIntensity = 0.14;
+      material.emissiveIntensity = 0.22;
+      material.roughness = 0.84;
+      material.metalness = 0.01;
+      material.envMapIntensity = 0.04;
     } else {
       material.color.lerp(new THREE.Color("#9dbbff"), 0.08).offsetHSL(0, 0.04, -0.02);
       material.emissive.copy(avatarBaseColor).lerp(themeAccent, 0.34).multiplyScalar(0.16);
-      material.emissiveIntensity = 0.42;
-      material.roughness = 0.38;
-      material.metalness = 0.16;
-      material.envMapIntensity = 0.44;
+      material.emissiveIntensity = 0.26;
+      material.roughness = 0.76;
+      material.metalness = 0.03;
+      material.envMapIntensity = 0.08;
     }
     material.needsUpdate = true;
   }
@@ -674,12 +697,26 @@ class AvatarView {
   currentFaceUrl = "";
   pendingFaceUrl = "";
   currentLabel = "";
+  currentRole: string | null = null;
+  visualInitialized = false;
+  displayAngle = 0;
+  targetAngle = 0;
+  displayRadius = 0;
+  targetRadius = 0;
+  displayYaw = 0;
+  targetYaw = 0;
   lastAngle = 0;
   lastLaneIndex = 0;
   lastRole: string | null = null;
   destroyed = false;
   debugMode = false;
   ownedMaterials: THREE.Material[];
+  playerId = "";
+  captureProxyMaterial: THREE.MeshBasicMaterial;
+  captureTorsoProxy: THREE.Mesh;
+  captureHipProxy: THREE.Mesh;
+  captureHeadProxy: THREE.Mesh;
+  captureProxyMeshes: THREE.Mesh[] = [];
 
   constructor(scene: THREE.Scene, asset: AvatarAsset, color: string, shadowsEnabled: boolean, themeId: ArenaThemeId) {
     this.group = new THREE.Group();
@@ -734,6 +771,55 @@ class AvatarView {
     this.faceMaskGroup.add(this.faceMaskOuter, this.faceMaskInner);
     this.faceMaskAnchor.add(this.faceMaskGroup);
     this.applyTheme(themeId);
+    this.captureProxyMaterial = new THREE.MeshBasicMaterial({
+      color: "#ff44aa",
+      transparent: true,
+      opacity: 0,
+      depthWrite: false
+    });
+    this.captureTorsoProxy = new THREE.Mesh(
+      new THREE.BoxGeometry(this.avatarHeight * 0.34, this.avatarHeight * 0.34, this.avatarHeight * 0.24),
+      this.captureProxyMaterial
+    );
+    this.captureTorsoProxy.position.set(0, this.avatarHeight * 0.52, 0);
+    this.captureTorsoProxy.userData.captureSampleOffsets = [
+      new THREE.Vector3(0, this.avatarHeight * 0.13, this.avatarHeight * 0.1),
+      new THREE.Vector3(0, this.avatarHeight * 0.08, this.avatarHeight * 0.1),
+      new THREE.Vector3(0, 0, this.avatarHeight * 0.1),
+      new THREE.Vector3(0, -this.avatarHeight * 0.08, this.avatarHeight * 0.1),
+      new THREE.Vector3(-this.avatarHeight * 0.12, this.avatarHeight * 0.1, this.avatarHeight * 0.1),
+      new THREE.Vector3(-this.avatarHeight * 0.08, this.avatarHeight * 0.04, this.avatarHeight * 0.1),
+      new THREE.Vector3(this.avatarHeight * 0.08, this.avatarHeight * 0.04, this.avatarHeight * 0.1),
+      new THREE.Vector3(this.avatarHeight * 0.12, this.avatarHeight * 0.1, this.avatarHeight * 0.1)
+    ];
+    this.captureHipProxy = new THREE.Mesh(
+      new THREE.BoxGeometry(this.avatarHeight * 0.28, this.avatarHeight * 0.2, this.avatarHeight * 0.22),
+      this.captureProxyMaterial
+    );
+    this.captureHipProxy.position.set(0, this.avatarHeight * 0.3, 0);
+    this.captureHipProxy.userData.captureSampleOffsets = [
+      new THREE.Vector3(0, this.avatarHeight * 0.03, this.avatarHeight * 0.09),
+      new THREE.Vector3(0, 0, this.avatarHeight * 0.09),
+      new THREE.Vector3(-this.avatarHeight * 0.08, 0, this.avatarHeight * 0.09),
+      new THREE.Vector3(this.avatarHeight * 0.08, 0, this.avatarHeight * 0.09)
+    ];
+    this.captureHeadProxy = new THREE.Mesh(
+      new THREE.SphereGeometry(this.avatarHeight * 0.13, 18, 18),
+      this.captureProxyMaterial
+    );
+    this.captureHeadProxy.position.set(0, this.avatarHeight * 0.12, this.avatarHeight * 0.03);
+    this.captureHeadProxy.userData.captureSampleOffsets = [
+      new THREE.Vector3(0, this.avatarHeight * 0.05, this.avatarHeight * 0.1),
+      new THREE.Vector3(-this.avatarHeight * 0.06, 0, this.avatarHeight * 0.08),
+      new THREE.Vector3(0, 0, this.avatarHeight * 0.1),
+      new THREE.Vector3(this.avatarHeight * 0.06, 0, this.avatarHeight * 0.08)
+    ];
+    this.captureProxyMeshes = [this.captureTorsoProxy, this.captureHipProxy, this.captureHeadProxy];
+    for (const proxy of this.captureProxyMeshes) {
+      proxy.layers.set(CAPTURE_PROXY_LAYER);
+      proxy.visible = true;
+    }
+    this.group.add(this.captureTorsoProxy, this.captureHipProxy);
     this.debugHeadHookMaterial = new THREE.MeshBasicMaterial({
       color: "#ff00ff",
       depthTest: false,
@@ -770,9 +856,12 @@ class AvatarView {
     this.debugOriginMarker.add(debugOriginAxes, debugOriginSphere);
     if (this.headBone) {
       this.headBone.add(this.faceMaskAnchor);
+      this.headBone.add(this.captureHeadProxy);
     } else {
       this.faceMaskAnchor.position.set(0, this.avatarHeight * 0.62, -this.avatarHeight * 0.08);
       this.group.add(this.faceMaskAnchor);
+      this.captureHeadProxy.position.set(0, this.avatarHeight * 0.74, this.avatarHeight * 0.03);
+      this.group.add(this.captureHeadProxy);
     }
     this.group.add(this.debugHeadHook);
     this.group.add(this.debugOriginMarker);
@@ -809,6 +898,21 @@ class AvatarView {
   applyTheme(themeId: ArenaThemeId) {
     this.currentThemeId = themeId;
     applyAvatarThemeMaterials(this.ownedMaterials, themeId, this.baseColor, this.faceMaskOuterMaterial);
+  }
+
+  applyVisualTransform() {
+    if (this.currentRole === ROLES.PHOTOGRAPHER) {
+      this.group.position.set(0, PHOTOGRAPHER_PLATFORM_Y, 0);
+      this.group.rotation.y = -this.displayYaw + PHOTOGRAPHER_YAW_OFFSET;
+      return;
+    }
+    const angleDelta = normalizeAngle(this.targetAngle - this.displayAngle);
+    const runnerTurnOffset = Math.abs(angleDelta) > MOVEMENT_EPSILON
+      ? Math.sign(angleDelta) * RUNNER_TURN_YAW_OFFSET
+      : 0;
+    const position = polarToPosition(this.displayAngle, this.displayRadius, RUNNER_PLATFORM_Y);
+    this.group.position.copy(position);
+    this.group.rotation.y = normalizeAngle(-this.displayAngle + Math.PI * 0.5 + runnerTurnOffset);
   }
 
   setDebugMode(enabled: boolean) {
@@ -944,6 +1048,36 @@ class AvatarView {
     material.needsUpdate = true;
   }
 
+  syncCaptureMetadata(playerId: string) {
+    if (this.playerId === playerId) {
+      return;
+    }
+    this.playerId = playerId;
+    for (const object of this.captureProxyMeshes) {
+      object.userData.captureOwnerId = playerId;
+    }
+  }
+
+  getCaptureRaycastObjects() {
+    return [...this.captureProxyMeshes];
+  }
+
+  getCaptureSnapshotTarget(): CaptureSnapshotTarget | null {
+    if (!this.playerId || this.currentRole !== ROLES.RUNNER || !this.group.visible) {
+      return null;
+    }
+    this.group.updateMatrixWorld(true);
+    const samplePoints = this.captureProxyMeshes.flatMap((proxy) => {
+      const offsets = Array.isArray(proxy.userData.captureSampleOffsets) ? proxy.userData.captureSampleOffsets : [];
+      return offsets.map((offset: THREE.Vector3) => proxy.localToWorld(offset.clone()));
+    });
+    return {
+      id: this.playerId,
+      samplePoints,
+      raycastObjects: this.getCaptureRaycastObjects()
+    };
+  }
+
   updateAnimation(player: RoundPlayer) {
     if (this.lastRole === null) {
       this.actionState = "idle";
@@ -969,17 +1103,18 @@ class AvatarView {
 
   update(player: RoundPlayer, textureLoader: THREE.TextureLoader) {
     const radius = player.role === ROLES.PHOTOGRAPHER ? 0 : ARENA.runnerLanes[player.laneIndex] ?? ARENA.runnerLanes[1];
-    const position = player.role === ROLES.PHOTOGRAPHER
-      ? new THREE.Vector3(0, PHOTOGRAPHER_PLATFORM_Y, 0)
-      : polarToPosition(player.angle, radius, RUNNER_PLATFORM_Y);
-    const angleDelta = normalizeAngle(player.angle - this.lastAngle);
-    const runnerTurnOffset = player.role === ROLES.RUNNER && Math.abs(angleDelta) > MOVEMENT_EPSILON
-      ? Math.sign(angleDelta) * RUNNER_TURN_YAW_OFFSET
-      : 0;
-    this.group.position.copy(position);
-    this.group.rotation.y = player.role === ROLES.PHOTOGRAPHER
-      ? -player.yaw + PHOTOGRAPHER_YAW_OFFSET
-      : normalizeAngle(-player.angle + Math.PI * 0.5 + runnerTurnOffset);
+    this.syncCaptureMetadata(player.id);
+    this.targetAngle = player.angle;
+    this.targetRadius = radius;
+    this.targetYaw = player.yaw;
+    this.currentRole = player.role;
+    if (!this.visualInitialized || this.lastRole !== player.role) {
+      this.displayAngle = this.targetAngle;
+      this.displayRadius = this.targetRadius;
+      this.displayYaw = this.targetYaw;
+      this.visualInitialized = true;
+      this.applyVisualTransform();
+    }
     this.updateAnimation(player);
     this.updateFaceMaskVisibility(player);
     this.updateFaceTexture(player, textureLoader);
@@ -992,6 +1127,18 @@ class AvatarView {
   }
 
   tick(deltaSeconds: number) {
+    if (this.visualInitialized) {
+      if (this.currentRole === ROLES.PHOTOGRAPHER) {
+        const yawAlpha = getSmoothingAlpha(deltaSeconds, AVATAR_VISUAL_YAW_LERP_SPEED);
+        this.displayYaw = normalizeAngle(this.displayYaw + normalizeAngle(this.targetYaw - this.displayYaw) * yawAlpha);
+      } else {
+        const angleAlpha = getSmoothingAlpha(deltaSeconds, AVATAR_VISUAL_ANGLE_LERP_SPEED);
+        const radiusAlpha = getSmoothingAlpha(deltaSeconds, AVATAR_VISUAL_RADIUS_LERP_SPEED);
+        this.displayAngle = normalizeAngle(this.displayAngle + normalizeAngle(this.targetAngle - this.displayAngle) * angleAlpha);
+        this.displayRadius += (this.targetRadius - this.displayRadius) * radiusAlpha;
+      }
+      this.applyVisualTransform();
+    }
     this.mixer.update(deltaSeconds);
     this.syncFaceMaskToHead();
     this.updateDebugHelpers();
@@ -1013,6 +1160,10 @@ class AvatarView {
     this.faceMaskInner.geometry.dispose();
     this.debugHeadHookMaterial.dispose();
     this.debugHeadHook.geometry.dispose();
+    this.captureProxyMaterial.dispose();
+    this.captureTorsoProxy.geometry.dispose();
+    this.captureHipProxy.geometry.dispose();
+    this.captureHeadProxy.geometry.dispose();
     this.debugBounds.geometry.dispose();
     (this.debugBounds.material as THREE.Material).dispose();
     this.debugOriginMarker.traverse((node) => {
@@ -1058,6 +1209,7 @@ export class ArenaView {
   };
   avatars = new Map<string, AvatarView>();
   fountains: THREE.Mesh[] = [];
+  captureStaticOccluders: THREE.Object3D[] = [];
   fountainBaseColorAngles: number[] = [];
   neonThemePillars: THREE.InstancedMesh | null = null;
   neonThemePillarData: ThemePillarDatum[] = [];
@@ -1433,6 +1585,7 @@ export class ArenaView {
     plaza.receiveShadow = true;
     this.floor.add(plaza);
     this.spectatorFrameObjects.push(plaza);
+    this.captureStaticOccluders.push(plaza);
 
     const ringMaterial = new THREE.MeshStandardMaterial({
       color: "#4f7090",
@@ -1446,6 +1599,7 @@ export class ArenaView {
       ring.position.y = ARENA.ringY;
       this.floor.add(ring);
       this.spectatorFrameObjects.push(ring);
+      this.captureStaticOccluders.push(ring);
     }
 
     const pedestal = new THREE.Mesh(
@@ -1461,6 +1615,7 @@ export class ArenaView {
     pedestal.receiveShadow = true;
     this.floor.add(pedestal);
     this.spectatorFrameObjects.push(pedestal);
+    this.captureStaticOccluders.push(pedestal);
 
     const fountainBase = new THREE.Mesh(
       new THREE.CylinderGeometry(ARENA.fountainBaseTopRadius, ARENA.fountainBaseBottomRadius, ARENA.fountainBaseHeight, 48),
@@ -1476,6 +1631,7 @@ export class ArenaView {
     fountainBase.position.y = ARENA.fountainBaseY;
     this.floor.add(fountainBase);
     this.spectatorFrameObjects.push(fountainBase);
+    this.captureStaticOccluders.push(fountainBase);
 
     const waterMaterial = new THREE.MeshStandardMaterial({
       color: "#8cefff",
@@ -2311,6 +2467,29 @@ export class ArenaView {
     return getProjectedPointBounds(this.spectatorFrameGeometry.meshPoints, this.camera);
   }
 
+  prepareStillFrame() {
+    this.updateCamera();
+    for (const avatar of this.avatars.values()) {
+      avatar.tick(0);
+    }
+    this.updateFountains();
+    this.updateThemeBackdrop(performance.now() / 1000);
+    this.scene.updateMatrixWorld(true);
+  }
+
+  getCaptureSnapshotTargets() {
+    return Array.from(this.avatars.values())
+      .map((avatar) => avatar.getCaptureSnapshotTarget())
+      .filter((target): target is CaptureSnapshotTarget => Boolean(target));
+  }
+
+  getCaptureSnapshotOccluders() {
+    return [
+      ...this.captureStaticOccluders,
+      ...this.fountains.filter((mesh) => mesh.visible)
+    ];
+  }
+
   renderLoop = () => {
     if (!this.active) {
       return;
@@ -2329,32 +2508,45 @@ export class ArenaView {
   };
 
   renderStillFrame() {
-    this.updateCamera();
-    for (const avatar of this.avatars.values()) {
-      avatar.tick(0);
-    }
-    this.updateFountains();
-    this.updateThemeBackdrop(performance.now() / 1000);
+    this.prepareStillFrame();
     this.renderMainViewport();
   }
 
-  capturePhoto() {
-    this.renderStillFrame();
+  captureShot(): CaptureShotResult {
     const parentWidth = this.canvas.clientWidth || window.innerWidth;
     const parentHeight = this.canvas.clientHeight || window.innerHeight;
     const previousAspect = this.camera.aspect;
+    const yaw = this.fallbackYaw;
+    const pitch = this.fallbackPitch;
     this.renderer.setSize(ARENA.captureWidth, ARENA.captureHeight, false);
     this.renderer.setScissorTest(false);
     this.renderer.setViewport(0, 0, ARENA.captureWidth, ARENA.captureHeight);
     this.camera.aspect = ARENA.captureAspectRatio;
     this.camera.updateProjectionMatrix();
+    this.prepareStillFrame();
+    const { capturedRunnerIds, blockedRunnerIds } = evaluateCaptureSnapshot({
+      camera: this.camera,
+      targets: this.getCaptureSnapshotTargets(),
+      occluders: this.getCaptureSnapshotOccluders()
+    });
     this.renderer.render(this.scene, this.camera);
     const imageDataUrl = this.renderer.domElement.toDataURL("image/jpeg", 0.72);
     this.renderer.setSize(parentWidth, parentHeight, false);
     this.camera.aspect = previousAspect;
     this.camera.updateProjectionMatrix();
+    this.prepareStillFrame();
     this.renderMainViewport();
-    return imageDataUrl;
+    return {
+      imageDataUrl,
+      capturedRunnerIds,
+      blockedRunnerIds,
+      yaw,
+      pitch
+    };
+  }
+
+  capturePhoto() {
+    return this.captureShot().imageDataUrl;
   }
 
   // Returns the CSS-pixel screen position of a world point, plus NDC and

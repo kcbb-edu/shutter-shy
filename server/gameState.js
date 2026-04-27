@@ -20,6 +20,7 @@ import {
   normalizeAngle,
   roundSeconds
 } from "../shared/protocol.js";
+import { evaluatePhotographerShotLegacy } from "../shared/capture.js";
 import { COPY } from "../shared/copy.js";
 
 function createRoundId() {
@@ -747,17 +748,23 @@ export class GameState {
     }
 
     const projectedWinnerBefore = this.getWinningTeam();
-    const visibleRunners = this.getRunners().filter((runner) => this.isRunnerVisibleToPhotographer(runner, photographer));
-    const capturedRunnerIds = visibleRunners.map((runner) => runner.id);
-    const horizontalFov = getHorizontalFovRadians(ARENA.captureAspectRatio);
-    const blockedRunnerIds = this.getRunners()
-      .filter((runner) => !capturedRunnerIds.includes(runner.id))
-      .filter((runner) => {
-        const delta = normalizeAngle(runner.angle - photographer.yaw);
-        return Math.abs(delta) <= horizontalFov / 2 + ARENA.runnerBodyAnglePadding
-          && this.isRunnerFullyObstructed(runner.angle, ARENA.runnerBodyAnglePadding);
-      })
-      .map((runner) => runner.id);
+    // Legacy fallback for older controllers that do not send client-side capture results.
+    const fallbackEvaluation = evaluatePhotographerShotLegacy({
+      players: this.state.players,
+      fountains: this.state.fountains,
+      yaw: photographer.yaw
+    });
+    const validRunnerIds = new Set(this.getRunners().map((runner) => runner.id));
+    const capturedRunnerIds = Array.isArray(payload.capturedRunnerIds)
+      ? unique(payload.capturedRunnerIds.filter((runnerId) => validRunnerIds.has(runnerId)))
+      : fallbackEvaluation.capturedRunnerIds;
+    const blockedRunnerIds = Array.isArray(payload.blockedRunnerIds)
+      ? unique(
+        payload.blockedRunnerIds.filter(
+          (runnerId) => validRunnerIds.has(runnerId) && !capturedRunnerIds.includes(runnerId)
+        )
+      )
+      : fallbackEvaluation.blockedRunnerIds;
     const newRunnerIds = capturedRunnerIds.filter((runnerId) => !this.state.capturedRunnerIds.includes(runnerId));
     if (newRunnerIds.length > 0) {
       this.state.capturedRunnerIds.push(...newRunnerIds);
@@ -934,7 +941,10 @@ export class GameState {
       galleryReview: this.getGalleryReviewStatus(),
       runnerSummary: this.getRunnerCaptureSummary(),
       runnerGroups: this.getRunnerGroups(),
-      items: this.state.successfulGallery.map((item) => ({ ...item }))
+      items: this.state.shotHistory.map((item) => ({
+        ...item,
+        successful: item.capturedRunnerIds.length > 0
+      }))
     };
   }
 

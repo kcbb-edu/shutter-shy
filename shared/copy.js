@@ -5,7 +5,7 @@ export const COPY = {
     guest: "訪客",
     player: "玩家",
     noRole: "尚未選擇",
-    ready: "準備完成",
+    ready: "準備好",
     cancelReady: "取消準備",
     online: "連線中",
     offline: "離線",
@@ -23,6 +23,8 @@ export const COPY = {
   },
   controller: {
     namePlaceholderSuffix: "（或自行輸入）",
+    enablePermissionsToContinue: "開啟以上權限後繼續",
+    readyFinished: "準備好了！",
     shutterReady: "可拍照",
     roomConnected: "已連上房間。",
     roomJoinHint: "輸入大螢幕上的房號，或直接使用建議名字。",
@@ -55,12 +57,18 @@ export const COPY = {
       return `${capturedCount}/${totalRunners} 位跑者被拍到。長按照片即可儲存。`;
     },
     noRunnerSummary: "本回合沒有跑者結果。",
-    noSuccessfulCaptures: "這回合還沒有成功照片。",
+    noSuccessfulCaptures: "這回合還沒有拍照紀錄。",
     successfulPhotoAlt: "拍到的照片",
+    missedPhotoAlt: "沒拍到的照片",
     noPreview: "沒有預覽圖",
     capturedCount(runnerCount) {
       return `${runnerCount} 位跑者`;
     },
+    blockedCount(runnerCount) {
+      return `被擋住 ${runnerCount} 位`;
+    },
+    shotHit: "拍到了",
+    shotMiss: "沒拍到",
     summaryCaptured: "拍到了",
     summaryEscaped: "逃掉了",
     permissionPlayersEmpty: "等待其他裝置加入。",

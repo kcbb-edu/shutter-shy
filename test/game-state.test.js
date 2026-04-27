@@ -240,7 +240,8 @@ test("active fountain can block an otherwise visible runner", () => {
   });
   assert.equal(shot.ok, true);
   assert.equal(shot.photo.capturedRunnerIds.includes(runnerA.id), false);
-  assert.equal(game.getGalleryState().items.length, 0);
+  assert.equal(game.getGalleryState().items.length, 1);
+  assert.equal(game.getGalleryState().items[0].successful, false);
 });
 
 test("runner does not count once most of the body width is covered by fountain", () => {
@@ -414,6 +415,35 @@ test("gallery state groups successful photos by runner", () => {
   assert.equal(runnerAGroup.photos[0].id, runnerBGroup.photos[0].id);
 });
 
+test("gallery state includes missed shots for review", () => {
+  const { game, photographer, runnerA } = createPreparedGame();
+  runnerA.angle = 0;
+  photographer.yaw = 0;
+  game.state.fountains.forEach((jet) => {
+    jet.active = false;
+  });
+
+  const hitShot = game.registerShutter(photographer.id, {
+    imageDataUrl: "data:image/jpeg;base64,ZmFrZQ==",
+    capturedRunnerIds: [runnerA.id],
+    blockedRunnerIds: []
+  });
+  assert.equal(hitShot.ok, true);
+  game.state.nextShutterAt = Date.now() - 1;
+
+  const missShot = game.registerShutter(photographer.id, {
+    imageDataUrl: "data:image/jpeg;base64,ZmFrZQ==",
+    capturedRunnerIds: [],
+    blockedRunnerIds: [runnerA.id]
+  });
+  assert.equal(missShot.ok, true);
+
+  const gallery = game.getGalleryState();
+  assert.equal(gallery.items.length, 2);
+  assert.equal(gallery.items[0].successful, false);
+  assert.equal(gallery.items[1].successful, true);
+});
+
 test("shutter uses the capture-time camera yaw instead of stale motion state", () => {
   const { game, photographer, runnerA } = createPreparedGame();
   runnerA.angle = 0.12;
@@ -430,4 +460,22 @@ test("shutter uses the capture-time camera yaw instead of stale motion state", (
 
   assert.equal(shot.ok, true);
   assert.equal(shot.photo.capturedRunnerIds.includes(runnerA.id), true);
+});
+
+test("shutter accepts client-side capture results for authoritative photo hits", () => {
+  const { game, photographer, runnerA, runnerB } = createPreparedGame();
+  photographer.yaw = Math.PI;
+  runnerA.angle = 0;
+  runnerB.angle = Math.PI;
+
+  const shot = game.registerShutter(photographer.id, {
+    imageDataUrl: "data:image/jpeg;base64,ZmFrZQ==",
+    capturedRunnerIds: [runnerA.id, "not-a-runner"],
+    blockedRunnerIds: [runnerB.id, runnerA.id]
+  });
+
+  assert.equal(shot.ok, true);
+  assert.deepEqual(shot.photo.capturedRunnerIds, [runnerA.id]);
+  assert.deepEqual(shot.photo.blockedRunnerIds, [runnerB.id]);
+  assert.equal(game.state.capturedRunnerIds.includes(runnerA.id), true);
 });

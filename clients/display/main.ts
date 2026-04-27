@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { ArenaView } from "../common/scene";
+import { installViewportCssVars } from "../common/viewport";
 import { CLIENT_TYPES, DEFAULT_ARENA_THEME_ID, GAME_PHASES, MSG_TYPES } from "../../shared/protocol.js";
 import { COPY, formatRoleLabel, formatWinnerTitle } from "../../shared/copy.js";
 
@@ -31,6 +32,10 @@ const elements = {
 
 const view = new ArenaView(elements.canvas, "spectator");
 view.setActive(true);
+installViewportCssVars(() => {
+  view.resize();
+  drawViewportOverlay();
+});
 
 const state = {
   room: null as any,
