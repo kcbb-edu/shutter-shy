@@ -308,6 +308,15 @@ export class RoomSession {
       case MSG_TYPES.CAMERA_MOTION:
         this.state.updatePhotographerMotion(playerId, payload);
         return;
+      case MSG_TYPES.MOTION_DIAGNOSTIC: {
+        this.logger("motion", "photographer-diagnostic", {
+          roomCode: this.roomCode,
+          playerId: meta.playerId,
+          name: meta.name,
+          ...payload
+        });
+        return;
+      }
       case MSG_TYPES.RUNNER_INPUT:
         this.state.updateRunnerInput(playerId, payload);
         return;

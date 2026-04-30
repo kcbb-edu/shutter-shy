@@ -28,6 +28,22 @@ const FACE_CROP_SCALE = 1.12;
 const FACE_CROP_VERTICAL_BIAS = -0.16;
 const FACE_DETECTION_WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm";
 const FACE_DETECTION_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
+const ORIENTATION_BASE_PITCH_RADIANS = -0.05;
+const ORIENTATION_YAW_SMOOTHING = 0.28;
+const ORIENTATION_PITCH_DEADZONE_DEGREES = 2.2;
+const ORIENTATION_PITCH_MAX_STEP_RADIANS = 0.04;
+const ORIENTATION_NEAR_LEVEL_DEGREES = 8;
+const ORIENTATION_SPIKE_YAW_RADIANS = 0.18;
+const ORIENTATION_YAW_GUARD_START_DEGREES = 6;
+const ORIENTATION_YAW_GUARD_FULL_DEGREES = 18;
+const ORIENTATION_YAW_MAX_STEP_LEVEL_RADIANS = 0.28;
+const ORIENTATION_YAW_MAX_STEP_TILTED_RADIANS = 0.07;
+const ORIENTATION_YAW_RATE_DEADZONE_RADIANS = 0.12;
+const ORIENTATION_YAW_RATE_MAX_STEP_RADIANS = 0.18;
+const ORIENTATION_YAW_RATE_FIXED_GAIN = 2.5;
+const ORIENTATION_MOTION_DT_MAX_SECONDS = 0.08;
+const ORIENTATION_ROTATION_RATE_FRESHNESS_MS = 160;
+const MOTION_DIAGNOSTIC_COOLDOWN_MS = 1200;
 const RANDOM_NAMES = [
   "小光",
   "米糕",
@@ -57,6 +73,8 @@ type PendingAction<T> = {
   value: T;
   sinceRevision: number;
 } | null;
+
+type RotationRateAxis = "alpha" | "beta" | "gamma";
 
 const elements = {
   app: document.getElementById("controller-app") as HTMLElement,
@@ -153,9 +171,24 @@ const state = {
   facePreviewUrl: "",
   orientation: {
     enabled: false,
+    initialized: false,
     baseAlpha: null as number | null,
+    baseBeta: null as number | null,
+    lastOrientationAt: 0,
+    lastMotionAt: 0,
+    lastMotionRates: {
+      alpha: null as number | null,
+      beta: null as number | null,
+      gamma: null as number | null
+    },
+    lastIntegratedMotionAt: 0,
+    usingRotationRate: false,
+    rotationRateAxis: null as RotationRateAxis | null,
+    rotationRateSign: 1 as 1 | -1,
+    rotationRateGain: 1,
+    lastDiagnosticAt: 0,
     yaw: 0,
-    pitch: -0.05
+    pitch: ORIENTATION_BASE_PITCH_RADIANS
   },
   localStepOverride: null as null | "permissions",
   downloadsOpen: false,
@@ -215,6 +248,153 @@ function debugLog(event: string, details: Record<string, unknown> = {}) {
 
 function pickRandomName() {
   return RANDOM_NAMES[Math.floor(Math.random() * RANDOM_NAMES.length)];
+}
+
+function wrapAngleRadians(angle: number) {
+  let wrapped = angle;
+  while (wrapped <= -Math.PI) {
+    wrapped += Math.PI * 2;
+  }
+  while (wrapped > Math.PI) {
+    wrapped -= Math.PI * 2;
+  }
+  return wrapped;
+}
+
+function lerpAngleRadians(value: number, target: number, alpha: number) {
+  const delta = wrapAngleRadians(target - value);
+  return wrapAngleRadians(value + delta * alpha);
+}
+
+function clampDelta(value: number, target: number, maxStep: number) {
+  const delta = target - value;
+  if (Math.abs(delta) <= maxStep) {
+    return target;
+  }
+  return value + Math.sign(delta) * maxStep;
+}
+
+function computeRelativePitchRadians(betaDegrees: number, baseBetaDegrees: number) {
+  const deltaDegrees = betaDegrees - baseBetaDegrees;
+  const stableDeltaDegrees = Math.abs(deltaDegrees) < ORIENTATION_PITCH_DEADZONE_DEGREES
+    ? 0
+    : deltaDegrees;
+  const targetPitch = ORIENTATION_BASE_PITCH_RADIANS + (stableDeltaDegrees * Math.PI) / 180;
+  return Math.max(ARENA.pitchClamp.min, Math.min(ARENA.pitchClamp.max, targetPitch));
+}
+
+function getYawGuardFactorDegrees(upwardTiltDegrees: number) {
+  if (upwardTiltDegrees <= ORIENTATION_YAW_GUARD_START_DEGREES) {
+    return 0;
+  }
+  if (upwardTiltDegrees >= ORIENTATION_YAW_GUARD_FULL_DEGREES) {
+    return 1;
+  }
+  return (
+    (upwardTiltDegrees - ORIENTATION_YAW_GUARD_START_DEGREES)
+    / (ORIENTATION_YAW_GUARD_FULL_DEGREES - ORIENTATION_YAW_GUARD_START_DEGREES)
+  );
+}
+
+function getGuardedYawRadians(currentYaw: number, rawYaw: number, upwardTiltDegrees: number) {
+  const guardFactor = getYawGuardFactorDegrees(upwardTiltDegrees);
+  const smoothedYaw = lerpAngleRadians(currentYaw, rawYaw, ORIENTATION_YAW_SMOOTHING);
+  const maxYawStep = ORIENTATION_YAW_MAX_STEP_LEVEL_RADIANS
+    + (ORIENTATION_YAW_MAX_STEP_TILTED_RADIANS - ORIENTATION_YAW_MAX_STEP_LEVEL_RADIANS) * guardFactor;
+  return clampDelta(currentYaw, smoothedYaw, maxYawStep);
+}
+
+function maybeSendMotionDiagnostic(details: {
+  alpha: number;
+  beta: number;
+  rawYaw: number;
+  pitchDeltaDegrees: number;
+  rawYawDelta: number;
+  guardFactor: number;
+  reason: "init" | "yaw-guard" | "rotation-rate-ready";
+  rotationRateAxis?: RotationRateAxis | null;
+  rotationRateSign?: 1 | -1;
+  rotationRateGain?: number;
+  usingRotationRate?: boolean;
+  fallbackToAlpha?: boolean;
+  dtMs?: number;
+  yawStep?: number;
+}) {
+  const now = Date.now();
+  if (details.reason !== "init" && now - state.orientation.lastDiagnosticAt < MOTION_DIAGNOSTIC_COOLDOWN_MS) {
+    return;
+  }
+  const baseBeta = state.orientation.baseBeta ?? details.beta;
+  state.orientation.lastDiagnosticAt = now;
+  send(MSG_TYPES.MOTION_DIAGNOSTIC, {
+    reason: details.reason,
+    at: now,
+    alpha: Number(details.alpha.toFixed(2)),
+    beta: Number(details.beta.toFixed(2)),
+    baseBeta: Number(baseBeta.toFixed(2)),
+    pitchDeltaDegrees: Number(details.pitchDeltaDegrees.toFixed(2)),
+    rawYaw: Number(details.rawYaw.toFixed(4)),
+    rawYawDelta: Number(details.rawYawDelta.toFixed(4)),
+    guardFactor: Number(details.guardFactor.toFixed(3)),
+    outputPitch: Number(state.orientation.pitch.toFixed(4)),
+    rotationRateAxis: details.rotationRateAxis ?? state.orientation.rotationRateAxis,
+    rotationRateSign: details.rotationRateSign ?? state.orientation.rotationRateSign,
+    rotationRateGain: Number((details.rotationRateGain ?? state.orientation.rotationRateGain).toFixed(3)),
+    usingRotationRate: details.usingRotationRate ?? state.orientation.usingRotationRate,
+    fallbackToAlpha: details.fallbackToAlpha ?? !state.orientation.usingRotationRate,
+    dtMs: details.dtMs ? Number(details.dtMs.toFixed(1)) : undefined,
+    yawStep: details.yawStep ? Number(details.yawStep.toFixed(4)) : undefined
+  });
+}
+
+function getRotationRateRadians(axis: RotationRateAxis) {
+  const value = state.orientation.lastMotionRates[axis];
+  return typeof value === "number" ? value * (Math.PI / 180) : null;
+}
+
+function maybeEnableRotationRateDirect() {
+  if (state.orientation.usingRotationRate) {
+    return;
+  }
+  if (Date.now() - state.orientation.lastMotionAt > ORIENTATION_ROTATION_RATE_FRESHNESS_MS) {
+    return;
+  }
+  const betaRate = getRotationRateRadians("beta");
+  if (betaRate == null) {
+    return;
+  }
+  state.orientation.usingRotationRate = true;
+  state.orientation.rotationRateAxis = "beta";
+  state.orientation.rotationRateSign = -1;
+  state.orientation.rotationRateGain = ORIENTATION_YAW_RATE_FIXED_GAIN;
+  state.orientation.lastIntegratedMotionAt = performance.now();
+  maybeSendMotionDiagnostic({
+    alpha: state.orientation.baseAlpha ?? 0,
+    beta: state.orientation.baseBeta ?? 0,
+    rawYaw: state.orientation.yaw,
+    pitchDeltaDegrees: 0,
+    rawYawDelta: 0,
+    guardFactor: 0,
+    reason: "rotation-rate-ready",
+    rotationRateAxis: "beta",
+    rotationRateSign: -1,
+    rotationRateGain: state.orientation.rotationRateGain,
+    usingRotationRate: true,
+    fallbackToAlpha: false
+  });
+}
+
+function resetRotationCalibration() {
+  state.orientation.lastOrientationAt = 0;
+  state.orientation.lastMotionAt = 0;
+  state.orientation.lastIntegratedMotionAt = 0;
+  state.orientation.lastMotionRates.alpha = null;
+  state.orientation.lastMotionRates.beta = null;
+  state.orientation.lastMotionRates.gamma = null;
+  state.orientation.usingRotationRate = false;
+  state.orientation.rotationRateAxis = null;
+  state.orientation.rotationRateSign = 1;
+  state.orientation.rotationRateGain = 1;
 }
 
 function refreshJoinPlaceholder() {
@@ -318,6 +498,9 @@ function isMotionReady(selfPlayer: any) {
 }
 
 function isRunnerFaceReady(selfPlayer: any) {
+  if (getEffectiveRole() !== ROLES.RUNNER) {
+    return true;
+  }
   if (!isRunnerFaceEnabled(selfPlayer)) {
     return true;
   }
@@ -999,7 +1182,9 @@ function connect() {
         }
       }
       if (selfPlayer?.role === ROLES.PHOTOGRAPHER) {
-        state.view.setCameraOrientation(state.orientation.yaw || selfPlayer.yaw, state.orientation.pitch || selfPlayer.pitch);
+        const cameraYaw = state.orientation.enabled ? state.orientation.yaw : selfPlayer.yaw;
+        const cameraPitch = state.orientation.enabled ? state.orientation.pitch : selfPlayer.pitch;
+        state.view.setCameraOrientation(cameraYaw, cameraPitch);
       }
       syncShutterCooldownFromRound();
       render();
@@ -1077,6 +1262,13 @@ function resetJoinedState() {
   state.shutterInputLockUntil = 0;
   state.lastShutterTriggerAt = 0;
   state.orientation.enabled = false;
+  state.orientation.initialized = false;
+  state.orientation.baseAlpha = null;
+  state.orientation.baseBeta = null;
+  resetRotationCalibration();
+  state.orientation.lastDiagnosticAt = 0;
+  state.orientation.yaw = 0;
+  state.orientation.pitch = ORIENTATION_BASE_PITCH_RADIANS;
   state.view.setTheme(DEFAULT_ARENA_THEME_ID);
   stopShutterCooldownLoop();
   clearFaceCanvases();
@@ -1214,7 +1406,13 @@ async function enableMotion() {
     }
   }
   state.orientation.enabled = true;
+  state.orientation.initialized = false;
   state.orientation.baseAlpha = null;
+  state.orientation.baseBeta = null;
+  resetRotationCalibration();
+  state.orientation.lastDiagnosticAt = 0;
+  state.orientation.yaw = 0;
+  state.orientation.pitch = ORIENTATION_BASE_PITCH_RADIANS;
   state.motionReadyOverride = true;
   state.pendingMotionPermission = false;
   send(MSG_TYPES.LOAD_PROGRESS, {
@@ -1223,6 +1421,58 @@ async function enableMotion() {
   });
   render();
 }
+
+window.addEventListener("devicemotion", (event) => {
+  if (!state.orientation.enabled || !isPhotographerPlaying()) {
+    return;
+  }
+  const rates = event.rotationRate;
+  if (!rates) {
+    return;
+  }
+  state.orientation.lastMotionAt = Date.now();
+  state.orientation.lastMotionRates.alpha = typeof rates.alpha === "number" ? rates.alpha : null;
+  state.orientation.lastMotionRates.beta = typeof rates.beta === "number" ? rates.beta : null;
+  state.orientation.lastMotionRates.gamma = typeof rates.gamma === "number" ? rates.gamma : null;
+  maybeEnableRotationRateDirect();
+  if (!state.orientation.usingRotationRate || !state.orientation.rotationRateAxis) {
+    return;
+  }
+  const rateRadians = getRotationRateRadians(state.orientation.rotationRateAxis);
+  if (rateRadians == null) {
+    return;
+  }
+  const now = performance.now();
+  if (!state.orientation.lastIntegratedMotionAt) {
+    state.orientation.lastIntegratedMotionAt = now;
+    return;
+  }
+  const dtSeconds = Math.min(
+    (now - state.orientation.lastIntegratedMotionAt) / 1000,
+    ORIENTATION_MOTION_DT_MAX_SECONDS
+  );
+  state.orientation.lastIntegratedMotionAt = now;
+  if (dtSeconds <= 0) {
+    return;
+  }
+  let yawRate = rateRadians * state.orientation.rotationRateSign * state.orientation.rotationRateGain;
+  if (Math.abs(yawRate) < ORIENTATION_YAW_RATE_DEADZONE_RADIANS) {
+    yawRate = 0;
+  }
+  const yawStep = Math.max(
+    -ORIENTATION_YAW_RATE_MAX_STEP_RADIANS,
+    Math.min(ORIENTATION_YAW_RATE_MAX_STEP_RADIANS, yawRate * dtSeconds)
+  );
+  if (Math.abs(yawStep) < 0.0005) {
+    return;
+  }
+  state.orientation.yaw = wrapAngleRadians(state.orientation.yaw + yawStep);
+  state.view.setCameraOrientation(state.orientation.yaw, state.orientation.pitch);
+  send(MSG_TYPES.CAMERA_MOTION, {
+    yaw: state.orientation.yaw,
+    pitch: state.orientation.pitch
+  });
+});
 
 window.addEventListener("deviceorientation", (event) => {
   if (!state.orientation.enabled || !isPhotographerPlaying()) {
@@ -1233,12 +1483,85 @@ window.addEventListener("deviceorientation", (event) => {
   if (state.orientation.baseAlpha == null) {
     state.orientation.baseAlpha = alpha;
   }
-  const yaw = (((state.orientation.baseAlpha - alpha) * Math.PI) / 180);
-  const pitch = Math.max(ARENA.pitchClamp.min, Math.min(ARENA.pitchClamp.max, (beta * Math.PI) / 180 - 0.75));
-  state.orientation.yaw = yaw;
-  state.orientation.pitch = pitch;
-  state.view.setCameraOrientation(yaw, pitch);
-  send(MSG_TYPES.CAMERA_MOTION, { yaw, pitch });
+  if (state.orientation.baseBeta == null) {
+    state.orientation.baseBeta = beta;
+  }
+  const rawYaw = wrapAngleRadians(((state.orientation.baseAlpha - alpha) * Math.PI) / 180);
+  const pitchDeltaDegrees = beta - state.orientation.baseBeta;
+  const targetPitch = computeRelativePitchRadians(beta, state.orientation.baseBeta);
+  const upwardTiltDegrees = Math.abs(pitchDeltaDegrees);
+  const now = performance.now();
+  if (!state.orientation.initialized) {
+    state.orientation.initialized = true;
+    state.orientation.yaw = rawYaw;
+    state.orientation.pitch = targetPitch;
+    state.orientation.lastOrientationAt = now;
+    maybeSendMotionDiagnostic({
+      alpha,
+      beta,
+      rawYaw,
+      pitchDeltaDegrees,
+      rawYawDelta: 0,
+      guardFactor: 0,
+      reason: "init"
+    });
+  } else {
+    state.orientation.lastOrientationAt = now;
+    const rawYawDelta = wrapAngleRadians(rawYaw - state.orientation.yaw);
+    const guardFactor = getYawGuardFactorDegrees(upwardTiltDegrees);
+    const canUseRotationRate = state.orientation.usingRotationRate
+      && state.orientation.rotationRateAxis != null;
+    const isNearLevel = Math.abs(pitchDeltaDegrees) < ORIENTATION_NEAR_LEVEL_DEGREES;
+    const isYawSpike = Math.abs(rawYawDelta) > ORIENTATION_SPIKE_YAW_RADIANS;
+    if (!canUseRotationRate && isNearLevel && isYawSpike) {
+      state.orientation.pitch = clampDelta(
+        state.orientation.pitch,
+        targetPitch,
+        ORIENTATION_PITCH_MAX_STEP_RADIANS
+      );
+      maybeSendMotionDiagnostic({
+        alpha,
+        beta,
+        rawYaw,
+        pitchDeltaDegrees,
+        rawYawDelta,
+        guardFactor,
+        reason: "yaw-guard"
+      });
+      state.view.setCameraOrientation(state.orientation.yaw, state.orientation.pitch);
+      send(MSG_TYPES.CAMERA_MOTION, {
+        yaw: state.orientation.yaw,
+        pitch: state.orientation.pitch
+      });
+      return;
+    }
+    if (!canUseRotationRate) {
+      state.orientation.yaw = getGuardedYawRadians(state.orientation.yaw, rawYaw, upwardTiltDegrees);
+    }
+    if (!canUseRotationRate && guardFactor > 0.01 && Math.abs(rawYawDelta) > ORIENTATION_YAW_MAX_STEP_TILTED_RADIANS) {
+      maybeSendMotionDiagnostic({
+        alpha,
+        beta,
+        rawYaw,
+        pitchDeltaDegrees,
+        rawYawDelta,
+        guardFactor,
+        reason: "yaw-guard",
+        usingRotationRate: false,
+        fallbackToAlpha: true
+      });
+    }
+    state.orientation.pitch = clampDelta(
+      state.orientation.pitch,
+      targetPitch,
+      ORIENTATION_PITCH_MAX_STEP_RADIANS
+    );
+  }
+  state.view.setCameraOrientation(state.orientation.yaw, state.orientation.pitch);
+  send(MSG_TYPES.CAMERA_MOTION, {
+    yaw: state.orientation.yaw,
+    pitch: state.orientation.pitch
+  });
 });
 
 window.setInterval(() => {
@@ -1627,6 +1950,10 @@ elements.photographerRole.addEventListener("click", () => {
   send(MSG_TYPES.ROLE_SET, { role: ROLES.PHOTOGRAPHER });
 });
 elements.runnerRole.addEventListener("click", () => {
+  state.faceToggleDesired = null;
+  state.faceReadyLive = false;
+  state.faceError = "";
+  stopFaceCamera();
   state.localStepOverride = null;
   state.pendingRole = { value: ROLES.RUNNER, sinceRevision: state.lobbyRevision };
   setInlineError("");
@@ -1676,6 +2003,9 @@ elements.permissionsNextButton.addEventListener("click", () => {
 elements.permissionsBackButton.addEventListener("click", () => {
   stopFaceCamera();
   state.localStepOverride = null;
+  state.faceToggleDesired = null;
+  state.faceReadyLive = false;
+  state.faceError = "";
   state.facePreviewUrl = "";
   clearFaceCanvases();
   elements.facePreviewImage.src = "";

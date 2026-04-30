@@ -159,7 +159,6 @@ export class GameState {
     this.countdownStartedAt = 0;
     for (const player of this.state.players) {
       player.role = null;
-      player.loadProgress = 0;
       player.ready = false;
       player.moveDirection = 0;
       player.pendingLaneShift = 0;
@@ -344,6 +343,8 @@ export class GameState {
       player.moveDirection = 0;
       player.pendingLaneShift = 0;
       player.setup.motionReady = false;
+      player.setup.faceEnabled = false;
+      player.setup.faceReady = true;
       player.laneIndex = 1;
       this.bumpLobbyRevision();
       this.bumpRoundRevision();
@@ -367,7 +368,8 @@ export class GameState {
     }
     if (role === ROLES.RUNNER) {
       player.setup.motionReady = false;
-      player.setup.faceReady = !player.setup.faceEnabled;
+      player.setup.faceEnabled = false;
+      player.setup.faceReady = true;
     }
     player.role = role;
     player.ready = false;
@@ -771,10 +773,15 @@ export class GameState {
       this.state.capturedRunnerIds = unique(this.state.capturedRunnerIds);
     }
 
+    const clientCreatedAt = Number(payload.createdAt || 0);
+    const acceptedAt = Number.isFinite(clientCreatedAt) && clientCreatedAt > 0
+      ? Math.max(now - 2_000, Math.min(now, clientCreatedAt))
+      : now;
+
     const photo = {
       id: crypto.randomUUID(),
       roundId: this.state.roundId,
-      createdAt: now,
+      createdAt: acceptedAt,
       capturedRunnerIds,
       newRunnerIds,
       blockedRunnerIds,

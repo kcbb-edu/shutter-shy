@@ -67,6 +67,49 @@ test("runner can ready without a face frame when face mapping is skipped", () =>
   assert.equal(result.ok, true);
 });
 
+test("runner face requirement resets when selecting runner again", () => {
+  const game = new GameState("1234");
+  const runner = game.addOrReconnectPlayer("Runner", "runner");
+  game.chooseRole(runner.id, ROLES.RUNNER);
+  game.setLoadProgress(runner.id, 100, {
+    faceEnabled: true,
+    faceReady: false
+  });
+  assert.equal(game.setReady(runner.id, true).ok, false);
+
+  game.chooseRole(runner.id, null);
+  let lobbyPlayer = game.getLobbyState().players.find((player) => player.id === runner.id);
+  assert.equal(lobbyPlayer.setup.faceEnabled, false);
+  assert.equal(lobbyPlayer.setup.faceReady, true);
+
+  game.chooseRole(runner.id, ROLES.RUNNER);
+  game.setLoadProgress(runner.id, 100);
+
+  lobbyPlayer = game.getLobbyState().players.find((player) => player.id === runner.id);
+  assert.equal(lobbyPlayer.setup.faceEnabled, false);
+  assert.equal(lobbyPlayer.setup.faceReady, true);
+  assert.equal(game.setReady(runner.id, true).ok, true);
+});
+
+test("loaded controllers stay ready-capable after lobby reset", () => {
+  const game = new GameState("1234");
+  const runner = game.addOrReconnectPlayer("Runner", "runner");
+  game.chooseRole(runner.id, ROLES.RUNNER);
+  game.setLoadProgress(runner.id, 100, {
+    faceEnabled: false,
+    faceReady: true
+  });
+
+  game.resetForLobby();
+  game.chooseRole(runner.id, ROLES.RUNNER);
+
+  const lobbyPlayer = game.getLobbyState().players.find((player) => player.id === runner.id);
+  assert.equal(lobbyPlayer.loadProgress, 100);
+  assert.equal(lobbyPlayer.setup.faceEnabled, false);
+  assert.equal(lobbyPlayer.setup.faceReady, true);
+  assert.equal(game.setReady(runner.id, true).ok, true);
+});
+
 test("offline players do not block ready or countdown", () => {
   const game = new GameState("1234");
   const photographer = game.addOrReconnectPlayer("Photo", "photo");

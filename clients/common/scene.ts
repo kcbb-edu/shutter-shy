@@ -114,7 +114,7 @@ const FACE_TEXTURE_UV_CENTER_Y = 0.56;
 const FACE_DEBUG_MARKER_ENABLED = false;
 const FACE_DEBUG_MARKER_RADIUS_RATIO = 0.08;
 const FOUNTAIN_BASE_TOP_Y = ARENA.fountainBaseY + ARENA.fountainBaseHeight * 0.5;
-const FOUNTAIN_JET_ARC_SPAN = ((Math.PI * 2) / ARENA.fountainJetCount) * 1.0;
+const FOUNTAIN_JET_ARC_SPAN = ((Math.PI * 2) / ARENA.fountainJetCount) * 0.995;
 const FOUNTAIN_JET_RADIAL_THICKNESS = 1.05;
 const FOUNTAIN_JET_MIN_SCALE_Y = 0.02;
 const FOUNTAIN_JET_MAX_SCALE_Y = 0.7;
@@ -208,6 +208,7 @@ let avatarAssetPromise: Promise<AvatarAsset> | null = null;
 let faceMaskCircleTexture: THREE.Texture | null = null;
 let arenaGlowTexture: THREE.Texture | null = null;
 let synthwaveSunTexture: THREE.Texture | null = null;
+let fountainJetTexture: THREE.Texture | null = null;
 const tempAnchorWorldPosition = new THREE.Vector3();
 const tempAnchorLocalPosition = new THREE.Vector3();
 const tempThemeTransform = new THREE.Object3D();
@@ -287,28 +288,29 @@ function applyAvatarThemeMaterials(
       })();
     material.color.copy(base);
     if (themeId === "synthwave") {
-      material.color.lerp(themeAccent, 0.14).offsetHSL(0, -0.1, 0.08);
-      material.emissive.copy(avatarBaseColor).lerp(themeShadow, 0.28).multiplyScalar(0.12);
-      material.emissiveIntensity = 0.22;
-      material.roughness = 0.84;
+      material.color.offsetHSL(0, -0.01, 0.06);
+      material.color.lerp(themeAccent, 0.018);
+      material.emissive.copy(avatarBaseColor).lerp(themeShadow, 0.16).multiplyScalar(0.06);
+      material.emissiveIntensity = 0.17;
+      material.roughness = 0.9;
       material.metalness = 0.01;
-      material.envMapIntensity = 0.04;
+      material.envMapIntensity = 0.01;
     } else {
-      material.color.lerp(new THREE.Color("#9dbbff"), 0.08).offsetHSL(0, 0.04, -0.02);
-      material.emissive.copy(avatarBaseColor).lerp(themeAccent, 0.34).multiplyScalar(0.16);
-      material.emissiveIntensity = 0.26;
-      material.roughness = 0.76;
+      material.color.offsetHSL(0, 0, 0.018);
+      material.emissive.copy(base).multiplyScalar(0.018);
+      material.emissiveIntensity = 0.06;
+      material.roughness = 0.88;
       material.metalness = 0.03;
-      material.envMapIntensity = 0.08;
+      material.envMapIntensity = 0.015;
     }
     material.needsUpdate = true;
   }
   if (faceMaskOuterMaterial) {
     faceMaskOuterMaterial.color.copy(avatarBaseColor);
     if (themeId === "synthwave") {
-      faceMaskOuterMaterial.color.lerp(new THREE.Color("#ffd3c7"), 0.18);
+      faceMaskOuterMaterial.color.lerp(new THREE.Color("#ffd3c7"), 0.08);
     } else {
-      faceMaskOuterMaterial.color.lerp(new THREE.Color("#87dfff"), 0.14);
+      faceMaskOuterMaterial.color.lerp(new THREE.Color("#cce2ff"), 0.01);
     }
     faceMaskOuterMaterial.needsUpdate = true;
   }
@@ -434,6 +436,63 @@ function getSynthwaveSunTexture() {
     synthwaveSunTexture.needsUpdate = true;
   }
   return synthwaveSunTexture;
+}
+
+function getFountainJetTexture() {
+  if (!fountainJetTexture) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    const context = canvas.getContext("2d")!;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+
+    const fillGradient = context.createLinearGradient(0, 0, 0, canvas.height);
+    fillGradient.addColorStop(0, "#d8f7ff");
+    fillGradient.addColorStop(0.22, "#eefcff");
+    fillGradient.addColorStop(0.6, "#c6f6ff");
+    fillGradient.addColorStop(1, "#8de8ff");
+    context.fillStyle = fillGradient;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+
+    const sideGradient = context.createLinearGradient(0, 0, canvas.width, 0);
+    sideGradient.addColorStop(0, "rgba(95, 217, 255, 0.82)");
+    sideGradient.addColorStop(0.18, "rgba(160, 238, 255, 0.98)");
+    sideGradient.addColorStop(0.5, "rgba(255, 255, 255, 1)");
+    sideGradient.addColorStop(0.82, "rgba(160, 238, 255, 0.98)");
+    sideGradient.addColorStop(1, "rgba(95, 217, 255, 0.82)");
+    context.fillStyle = sideGradient;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (const [x, width, alpha] of [[0.22, 0.12, 0.16], [0.5, 0.16, 0.28], [0.78, 0.12, 0.16]] as const) {
+      const streakGradient = context.createLinearGradient(0, 0, 0, canvas.height);
+      streakGradient.addColorStop(0, `rgba(255,255,255,${alpha * 0.7})`);
+      streakGradient.addColorStop(0.48, `rgba(255,255,255,${alpha})`);
+      streakGradient.addColorStop(1, `rgba(200,248,255,${alpha * 0.65})`);
+      context.fillStyle = streakGradient;
+      context.fillRect(canvas.width * x - canvas.width * width * 0.5, 0, canvas.width * width, canvas.height);
+    }
+
+    const topSoftening = context.createLinearGradient(0, 0, 0, canvas.height * 0.7);
+    topSoftening.addColorStop(0, "rgba(255,255,255,0.2)");
+    topSoftening.addColorStop(0.5, "rgba(255,255,255,0.08)");
+    topSoftening.addColorStop(1, "rgba(255,255,255,0)");
+    context.fillStyle = topSoftening;
+    context.fillRect(0, 0, canvas.width, canvas.height * 0.7);
+
+    const lowerDensity = context.createLinearGradient(0, canvas.height * 0.15, 0, canvas.height);
+    lowerDensity.addColorStop(0, "rgba(255,255,255,0)");
+    lowerDensity.addColorStop(0.45, "rgba(120,225,255,0.1)");
+    lowerDensity.addColorStop(1, "rgba(80,208,255,0.18)");
+    context.fillStyle = lowerDensity;
+    context.fillRect(0, canvas.height * 0.15, canvas.width, canvas.height * 0.85);
+
+    fountainJetTexture = new THREE.CanvasTexture(canvas);
+    fountainJetTexture.colorSpace = THREE.SRGBColorSpace;
+    fountainJetTexture.wrapS = THREE.ClampToEdgeWrapping;
+    fountainJetTexture.wrapT = THREE.ClampToEdgeWrapping;
+    fountainJetTexture.needsUpdate = true;
+  }
+  return fountainJetTexture;
 }
 
 function applyFaceTextureFrame(texture: THREE.Texture) {
@@ -638,8 +697,11 @@ function createFountainJetGeometry(centerAngle: number) {
 
   const geometry = new THREE.ExtrudeGeometry(footprint, {
     depth: ARENA.fountainJetHeight,
-    steps: 1,
-    bevelEnabled: false,
+    steps: 4,
+    bevelEnabled: true,
+    bevelThickness: 0.03,
+    bevelSize: 0.02,
+    bevelSegments: 2,
     curveSegments: 32
   });
   geometry.rotateX(-Math.PI / 2);
@@ -1449,24 +1511,24 @@ export class ArenaView {
     }
     if (this.hemisphereLight) {
       if (themeId === "synthwave") {
-        this.hemisphereLight.color.set("#fff2e4");
-        this.hemisphereLight.groundColor.set("#ffcbb1");
-        this.hemisphereLight.intensity = 1.26;
+        this.hemisphereLight.color.set("#fff7ef");
+        this.hemisphereLight.groundColor.set("#ffcab8");
+        this.hemisphereLight.intensity = 1.02;
       } else {
-        this.hemisphereLight.color.set("#96b7ff");
-        this.hemisphereLight.groundColor.set("#090d18");
-        this.hemisphereLight.intensity = 1.12;
+        this.hemisphereLight.color.set("#ffffff");
+        this.hemisphereLight.groundColor.set("#171c2a");
+        this.hemisphereLight.intensity = 0.58;
       }
     }
     if (this.sunlight) {
       if (themeId === "synthwave") {
-        this.sunlight.color.set("#ffe3bf");
-        this.sunlight.intensity = 1.18;
-        this.sunlight.position.set(14, 26, 8);
+        this.sunlight.color.set("#fff0cf");
+        this.sunlight.intensity = 1.34;
+        this.sunlight.position.set(15, 27, 9);
       } else {
-        this.sunlight.color.set("#ffbadc");
-        this.sunlight.intensity = 1.18;
-        this.sunlight.position.set(9, 20, 12);
+        this.sunlight.color.set("#ffffff");
+        this.sunlight.intensity = 1.14;
+        this.sunlight.position.set(11, 22, 10);
       }
     }
     this.updateArenaSurfacePalette(themeId);
@@ -1485,62 +1547,62 @@ export class ArenaView {
         const role = node.userData.spectatorDiagnosticRole;
         if (themeId === "synthwave") {
           if (role === "plaza") {
-            material.color.set("#ffd9b8");
-            material.emissive.set("#ffbf99");
-            material.emissiveIntensity = 0.03;
-            material.roughness = 0.68;
+            material.color.set("#ffe1c7");
+            material.emissive.set("#ffc6a9");
+            material.emissiveIntensity = 0.02;
+            material.roughness = 0.74;
             material.metalness = 0.02;
-            material.envMapIntensity = 0.08;
+            material.envMapIntensity = 0.05;
           } else if (role === "ring") {
-            material.color.set("#ffd478");
-            material.emissive.set("#ff9fc7");
-            material.emissiveIntensity = 0.07;
-            material.roughness = 0.5;
+            material.color.set("#ffe08a");
+            material.emissive.set("#ffb4d3");
+            material.emissiveIntensity = 0.1;
+            material.roughness = 0.42;
             material.metalness = 0.04;
-            material.envMapIntensity = 0.12;
+            material.envMapIntensity = 0.08;
           } else if (role === "pedestal") {
-            material.color.set("#ffb8a6");
-            material.emissive.set("#ff88b5");
-            material.emissiveIntensity = 0.08;
-            material.roughness = 0.52;
+            material.color.set("#ffbead");
+            material.emissive.set("#ff97c1");
+            material.emissiveIntensity = 0.1;
+            material.roughness = 0.46;
             material.metalness = 0.03;
-            material.envMapIntensity = 0.1;
+            material.envMapIntensity = 0.08;
           } else if (role === "fountain-base") {
-            material.color.set("#8fdfdd");
-            material.emissive.set("#76dfff");
-            material.emissiveIntensity = 0.18;
-            material.roughness = 0.24;
+            material.color.set("#93e7ea");
+            material.emissive.set("#88e6ff");
+            material.emissiveIntensity = 0.22;
+            material.roughness = 0.18;
             material.metalness = 0.02;
-            material.envMapIntensity = 0.14;
+            material.envMapIntensity = 0.1;
           }
         } else if (role === "plaza") {
-          material.color.set("#263147");
-          material.emissive.set("#0c1631");
-          material.emissiveIntensity = 0.12;
-          material.roughness = 0.28;
-          material.metalness = 0.2;
-          material.envMapIntensity = 0.28;
+          material.color.set("#2f2952");
+          material.emissive.set("#111734");
+          material.emissiveIntensity = 0.04;
+          material.roughness = 0.48;
+          material.metalness = 0.08;
+          material.envMapIntensity = 0.08;
         } else if (role === "ring") {
-          material.color.set("#5e4a78");
-          material.emissive.set("#1e4c78");
+          material.color.set("#8b76c9");
+          material.emissive.set("#33a1de");
           material.emissiveIntensity = 0.18;
           material.roughness = 0.24;
-          material.metalness = 0.18;
-          material.envMapIntensity = 0.34;
+          material.metalness = 0.08;
+          material.envMapIntensity = 0.1;
         } else if (role === "pedestal") {
-          material.color.set("#7e5d85");
-          material.emissive.set("#3d1e4d");
-          material.emissiveIntensity = 0.16;
+          material.color.set("#a17ab5");
+          material.emissive.set("#5d2d73");
+          material.emissiveIntensity = 0.14;
           material.roughness = 0.22;
-          material.metalness = 0.14;
-          material.envMapIntensity = 0.3;
+          material.metalness = 0.06;
+          material.envMapIntensity = 0.1;
         } else if (role === "fountain-base") {
-          material.color.set("#173846");
-          material.emissive.set("#36c8f3");
+          material.color.set("#1f5d88");
+          material.emissive.set("#49d0ff");
           material.emissiveIntensity = 0.24;
-          material.roughness = 0.14;
-          material.metalness = 0.12;
-          material.envMapIntensity = 0.24;
+          material.roughness = 0.16;
+          material.metalness = 0.06;
+          material.envMapIntensity = 0.1;
         }
       }
     });
@@ -1635,10 +1697,14 @@ export class ArenaView {
 
     const waterMaterial = new THREE.MeshStandardMaterial({
       color: "#8cefff",
+      map: getFountainJetTexture(),
       emissive: "#42dfff",
       emissiveIntensity: 0.48,
       roughness: 0.14,
-      metalness: 0.04
+      metalness: 0.04,
+      transparent: false,
+      opacity: 1,
+      side: THREE.DoubleSide
     });
     for (let index = 0; index < ARENA.fountainJetCount; index += 1) {
       const angle = (index / ARENA.fountainJetCount) * Math.PI * 2;
@@ -1695,7 +1761,7 @@ export class ArenaView {
     const pillarMaterial = new THREE.MeshBasicMaterial({
       color: "#ffffff",
       transparent: true,
-      opacity: 0.96
+      opacity: 1
     });
     pillarMaterial.toneMapped = false;
     this.neonThemePillars = new THREE.InstancedMesh(pillarGeometry, pillarMaterial, NEON_THEME_BACKDROP.pillars.count);
@@ -1714,7 +1780,7 @@ export class ArenaView {
         heightBias: seededUnit(index + 61),
         tintMix: seededUnit(index + 71)
       });
-      tempThemeColor.copy(getThemePaletteColor("neon", this.neonThemePillarData[index].angle, 0)).offsetHSL(0, 0, (this.neonThemePillarData[index].tintMix - 0.5) * 0.08);
+      tempThemeColor.copy(getThemePaletteColor("neon", this.neonThemePillarData[index].angle, 0)).offsetHSL(0, 0, 0.1 + (this.neonThemePillarData[index].tintMix - 0.5) * 0.08);
       this.neonThemePillars.setColorAt(index, tempThemeColor);
     }
     this.neonThemePillars.instanceMatrix.needsUpdate = true;
@@ -1749,12 +1815,12 @@ export class ArenaView {
 
     const cubeGeometry = new THREE.BoxGeometry(1, 1, 1);
     const cubeMaterial = new THREE.MeshStandardMaterial({
-      color: "#b9cbff",
-      emissive: "#5cdbff",
-      emissiveIntensity: 0.2,
-      roughness: 0.2,
-      metalness: 0.12,
-      envMapIntensity: 0.42
+      color: "#d6e3ff",
+      emissive: "#7ee8ff",
+      emissiveIntensity: 0.34,
+      roughness: 0.14,
+      metalness: 0.08,
+      envMapIntensity: 0.5
     });
     cubeMaterial.toneMapped = false;
     this.neonThemeFloatingCubes = new THREE.InstancedMesh(cubeGeometry, cubeMaterial, NEON_THEME_BACKDROP.floatingCubes.count);
@@ -1786,7 +1852,7 @@ export class ArenaView {
         tilt: (seededUnit(index + 151) - 0.5) * 0.75,
         tintMix: mix
       });
-      tempThemeColor.copy(getThemePaletteColor("neon", this.neonThemeCubeData[index].angle, 0)).offsetHSL(0, 0, (mix - 0.5) * 0.08);
+      tempThemeColor.copy(getThemePaletteColor("neon", this.neonThemeCubeData[index].angle, 0)).offsetHSL(0, 0, 0.12 + (mix - 0.5) * 0.08);
       this.neonThemeFloatingCubes.setColorAt(index, tempThemeColor);
     }
     this.neonThemeFloatingCubes.instanceMatrix.needsUpdate = true;
@@ -1945,12 +2011,12 @@ export class ArenaView {
 
     const cubeGeometry = new THREE.BoxGeometry(1, 1, 1);
     const cubeMaterial = new THREE.MeshStandardMaterial({
-      color: "#ffdcb4",
-      emissive: "#ffcfd8",
-      emissiveIntensity: 0.06,
-      roughness: 0.46,
+      color: "#fff0cf",
+      emissive: "#ffdce6",
+      emissiveIntensity: 0.12,
+      roughness: 0.32,
       metalness: 0.02,
-      envMapIntensity: 0.16
+      envMapIntensity: 0.2
     });
     this.synthwaveThemeFloatingCubes = new THREE.InstancedMesh(
       cubeGeometry,
@@ -1994,7 +2060,7 @@ export class ArenaView {
           ? THREE.MathUtils.lerp(0.53, 0.58, seededUnit(index + 691))
           : THREE.MathUtils.lerp(0.05, 0.1, seededUnit(index + 691)),
         THREE.MathUtils.lerp(0.54, 0.76, seededUnit(index + 701)),
-        THREE.MathUtils.lerp(0.62, 0.8, seededUnit(index + 711))
+        THREE.MathUtils.lerp(0.72, 0.88, seededUnit(index + 711))
       );
       this.synthwaveThemeFloatingCubes.setColorAt(index, tempThemeColor);
     }
@@ -2077,7 +2143,7 @@ export class ArenaView {
           );
           tempThemeTransform.rotation.set(0, pillar.angle + Math.PI * 0.5, 0);
           tempThemeTransform.scale.set(pillar.width, animatedHeight, pillar.depth);
-          tempThemeColor.copy(getThemePaletteColor("neon", pillar.angle, elapsedSeconds)).offsetHSL(0, 0, (pillar.tintMix - 0.5) * 0.08);
+          tempThemeColor.copy(getThemePaletteColor("neon", pillar.angle, elapsedSeconds)).offsetHSL(0, 0, 0.1 + (pillar.tintMix - 0.5) * 0.08);
           this.neonThemePillars.setColorAt(index, tempThemeColor);
         } else {
           tempThemeTransform.position.set(0, -100, 0);
@@ -2130,7 +2196,7 @@ export class ArenaView {
             cube.tilt * 0.6
           );
           tempThemeTransform.scale.setScalar(cube.size);
-          tempThemeColor.copy(getThemePaletteColor("neon", cube.angle, elapsedSeconds)).offsetHSL(0, 0, (cube.tintMix - 0.5) * 0.08);
+          tempThemeColor.copy(getThemePaletteColor("neon", cube.angle, elapsedSeconds)).offsetHSL(0, 0, 0.12 + (cube.tintMix - 0.5) * 0.08);
           this.neonThemeFloatingCubes.setColorAt(index, tempThemeColor);
         } else {
           tempThemeTransform.position.set(0, -100, 0);
@@ -2225,7 +2291,7 @@ export class ArenaView {
             cube.tilt * 0.7
           );
           tempThemeTransform.scale.setScalar(cube.size);
-          tempThemeColor.copy(getSynthwaveCubeColor(cube.tintMix, elapsedSeconds, cube.phase));
+          tempThemeColor.copy(getSynthwaveCubeColor(cube.tintMix, elapsedSeconds, cube.phase)).offsetHSL(0, 0, 0.08);
           this.synthwaveThemeFloatingCubes.setColorAt(index, tempThemeColor);
         } else {
           tempThemeTransform.position.set(0, -100, 0);
